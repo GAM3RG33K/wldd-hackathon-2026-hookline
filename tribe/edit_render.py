@@ -32,6 +32,8 @@ def _esc(text):
 def segments(edit, p, T):
     """[(start, end, effect)] for an edit; effect is None or (kind, value)."""
     a, b = float(p.get("start", 0)), float(min(p.get("end", T), T))
+    if edit == "baseline":  # re-encode only: isolates encoding effects from the edit itself
+        return [(0, T, None)]
     if edit == "trim":
         return [(0, a, None), (b, T, None)]
     if edit == "cold_open":

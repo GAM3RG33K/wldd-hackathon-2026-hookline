@@ -8,6 +8,7 @@ advice is specific to this video: "no cut for 4.0s (your best part cuts every 1.
 import numpy as np
 
 MAX_SUGGESTIONS = 5
+MAX_END_CUT = 0.25  # "end earlier" may remove at most 25% of the reel
 
 
 def fmt(t):
@@ -139,8 +140,9 @@ def suggest(report):
     # 3) ending: weak last seconds -> end on the last peak
     import hookline_report as HL
     peaks = HL.attention_peaks(att)
-    if n > 6 and float(np.mean(att[-3:])) < 40 and peaks and peaks[-1] < n - 3:
-        end = min(n, peaks[-1] + 2)
+    end = min(n, peaks[-1] + 2) if peaks else n
+    # only a tightening edit: never cut more than MAX_END_CUT of the reel
+    if n > 6 and float(np.mean(att[-3:])) < 40 and peaks and peaks[-1] < n - 3 and (n - end) <= MAX_END_CUT * n:
         out.append({"at": f"{fmt(end)}-{fmt(n)}", "start": end, "end": n, "issue": "weak ending",
                     "edit": "end", "suggestion": f"End at {fmt(end)} on the last high point; cut the last {n - end}s.",
                     "why": f"attention in the last 3s averages {np.mean(att[-3:]):.0f}",

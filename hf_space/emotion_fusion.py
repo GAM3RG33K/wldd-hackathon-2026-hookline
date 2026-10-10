@@ -28,6 +28,7 @@ GO_MAP = {
     "sadness": {"sadness": 1.0, "grief": 1.0, "remorse": 0.7, "disappointment": 0.7},
 }
 CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8}
+VISUAL_TEMPER = 0.5  # flattens CLIP's sharp softmax so one prompt can't take every second
 
 
 def _seconds(x, n, default=None):
@@ -49,10 +50,12 @@ def fuse(report, extra):
     vis = cues.get("visual") or {}
     if vis:
         used.append("visual")
-        neutral = np.array(_seconds(vis.get("neutral"), n, 0.0) , dtype=float)
-        for j, e in enumerate(EMOTIONS):
-            dist[:, j] += CHANNEL_WEIGHT["visual"] * np.array(_seconds(vis.get(e), n, 0.0), dtype=float)
-        weight += CHANNEL_WEIGHT["visual"] * (1 - neutral)
+        # CLIP's softmax (logit scale 100) is winner-take-all; temper it (p^0.5, renormalised)
+        keys = EMOTIONS + ["neutral"]
+        P = np.array([_seconds(vis.get(k), n, 0.0) for k in keys], dtype=float).T ** VISUAL_TEMPER
+        P = P / np.maximum(P.sum(1, keepdims=True), 1e-9)
+        dist += CHANNEL_WEIGHT["visual"] * P[:, :len(EMOTIONS)]
+        weight += CHANNEL_WEIGHT["visual"] * (1 - P[:, -1])
 
     text = (cues.get("text") or {}).get("probs") or []
     if any(text):
