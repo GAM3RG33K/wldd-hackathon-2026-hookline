@@ -160,3 +160,16 @@
   PNG shown under "Full chart" only when it is a real PNG, and dark mode.
 - TUI: AttentionStrip is 30vh tall and full pane width, with a 0/50/100 y-axis, bars coloured
   by zone, survival dots drawn over the bars, a marker row (h/!/*/|), time ticks and a legend.
+
+## Batch of 6 random reels (a100-large, all three modalities), 15:43-15:56
+- All 6 done, 12.5 min total. Run time per reel 43-260s for 13-92s of video, about 2.5-2.8s per video second.
+- The faster-whisper fast path is confirmed working: 0.2-4.2s per reel (was 60-95s via uvx whisperx).
+  Video features are now about 90-95% of each job.
+- PNG and markdown now come back from the Space (route-order fix).
+- Word counts look low for some reels: FC032 0 words in 18s, FC023 17 in 51s, FL034 10 in 27s.
+  Language is hard-coded "english" in tribev2's ExtractWordsFromAudio; Hindi/Hinglish or
+  music-only reels may lose speech. Needs a check (language detection, or `language=None`).
+- Scores vs views (n=6, validation context only): both outliers (65M and 50M views) scored lowest
+  (hook 47/46, virality 38/35), while FC032 (567k) and FC023 (56k) scored hook 88. The scores are
+  within-video normalised and uncalibrated, so they are not comparable across reels. Even so, there
+  is no positive relation in this sample. The CFG fit against views (research/scoring-heuristic.md) is needed before any claim.
