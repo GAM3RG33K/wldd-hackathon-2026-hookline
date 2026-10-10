@@ -389,6 +389,9 @@ class Hookline(App):
         self.say("Start: pick a reel on the left and press Enter.  ? for help.")
         self.query_one("#reels", Tree).focus()
         self.boot()
+        self.watch_live = None  # Space job id whose progress is on screen (from "live on Space")
+        self.set_interval(5, self.tick_saved)   # batch/other clients save reports while we run
+        self.set_interval(3, self.tick_live)    # running/queued jobs on the Space, from any client
 
     def build_tree(self):
         tree = self.query_one("#reels", Tree)
@@ -406,22 +409,92 @@ class Hookline(App):
         if not any(self.corpus.values()):
             tree.root.add_leaf(Text("no samples/ folder found", "dim"), data={"kind": "folder"})
         self.own_node = tree.root.add("your files", data={"kind": "folder"}, expand=True)
-        self.saved_node = tree.root.add("saved reports", data={"kind": "folder"})
+        self.live_node = tree.root.add("live on Space", data={"kind": "folder"}, expand=True)
+        self._live_sig = None
+        self.saved_node = tree.root.add("saved reports", data={"kind": "folder"}, expand=True)
+        self._saved_sig = None
         self.refresh_saved()
         self.call_after_refresh(setattr, tree, "cursor_line", 0)
 
-    def refresh_saved(self):
+    def refresh_saved(self, force=True):
+        paths = [p for p in saved_reports()[:40] if p.parent.name != "demo"]
+        sig = tuple((p.parent.name, p.stat().st_mtime) for p in paths)
+        if not force and sig == self._saved_sig:
+            return
+        self._saved_sig = sig
         self.saved_node.remove_children()
-        for p in saved_reports()[:30]:
-            if p.parent.name == "demo":
-                continue
+        for p in paths:
             try:
                 r = json.loads(p.read_text())
-                label = Text(f"{p.parent.name}  ")
-                label.append(f"hook {r['scores']['hook_pct']:.0f}", "dim")
+                s = r["scores"]
+                name = r.get("source_id") or Path(r.get("local_video") or p.parent.name).stem
+                if name == "input":
+                    name = p.parent.name
+                label = Text(f"{name:<7}")
+                tag = s.get("virality_tag") or s.get("virality_band", "")
+                label.append(f"{s['virality']:>3.0f} {tag}", BAND_STYLE.get(tag, "dim"))
             except Exception:
                 continue
             self.saved_node.add_leaf(label, data={"kind": "saved", "job": p.parent.name})
+        self.saved_node.set_label(f"saved reports ({len(self.saved_node.children)})")
+
+    def tick_saved(self):
+        self.refresh_saved(force=False)
+
+    def tick_live(self):
+        if self.token:
+            self.fetch_live()
+
+    @work(thread=True, exclusive=True, group="live")
+    def fetch_live(self):
+        try:
+            jobs = http_json(f"{SPACE}/jobs", self.token, timeout=8)
+        except Exception:
+            return
+        active = [j for j in jobs if j.get("status") in ("queued", "running")]
+        self.call_from_thread(self.update_live, active)
+        sid = self.watch_live
+        if sid:
+            try:
+                p = http_json(f"{SPACE}/jobs/{sid}", self.token, timeout=8)
+            except Exception:
+                return
+            self.call_from_thread(self.show_live_progress, sid, p)
+
+    def update_live(self, active):
+        sig = tuple((j["job_id"], j.get("status"), j.get("stage")) for j in active)
+        for node in self.live_node.children:  # refresh labels in place (cheap, keeps cursor)
+            j = next((x for x in active if x["job_id"] == node.data.get("sid")), None)
+            if j:
+                node.set_label(self._live_label(j))
+        if sig != self._live_sig and {j["job_id"] for j in active} != {n.data.get("sid") for n in self.live_node.children}:
+            self.live_node.remove_children()
+            for j in active:
+                self.live_node.add_leaf(self._live_label(j), data={"kind": "live", "sid": j["job_id"],
+                                                                   "source": j.get("source")})
+        self._live_sig = sig
+        self.live_node.set_label(f"live on Space ({len(active)})")
+
+    def _live_label(self, j):
+        src = Path(j.get("source") or j["job_id"]).stem
+        t = Text(f"{src:<7}")
+        if j.get("status") == "queued":
+            t.append("queued", "yellow")
+        else:
+            t.append(f"{j.get('stage', '?')} {fmt_dur(j.get('age_s'))}", "cyan")
+        return t
+
+    def show_live_progress(self, sid, p):
+        if self.watch_live != sid:
+            return
+        if p.get("status") in ("done", "failed", "cancelled"):
+            self.say(f"Space job {sid} {p['status']}; batch reports appear under saved reports when saved.",
+                     "green" if p["status"] == "done" else "yellow")
+            if p["status"] != "done":
+                return
+        run = {"d": {"id": Path(getattr(self, "watch_source", None) or sid).stem, "path": None}, "sid": sid,
+               "t0": time.time() - (p.get("elapsed_s") or 0), "last_ok": time.time(), "p": p}
+        self.show_progress(run)
 
     # ---- status line + header
     def set_header(self):
@@ -544,6 +617,13 @@ class Hookline(App):
     @on(Tree.NodeHighlighted)
     def highlighted(self, ev: Tree.NodeHighlighted):
         d = ev.node.data or {}
+        self.watch_live = d.get("sid") if d.get("kind") == "live" else None
+        self.watch_source = d.get("source")
+        if d.get("kind") == "live":
+            self.current_job = None
+            self.say(f"Live Space job {d['sid']} ({d.get('source')}): progress updates every 3s")
+            self.fetch_live()
+            return
         self.current = d if d.get("kind") in ("reel", "file", "saved") else self.current
         if d.get("kind") == "saved":
             p = OUT / d["job"] / "report.json"

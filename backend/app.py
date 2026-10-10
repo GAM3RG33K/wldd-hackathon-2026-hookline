@@ -82,7 +82,8 @@ INDEX = """<!doctype html><meta charset=utf-8><meta name=viewport content="width
 button{background:#111;color:#fff;border:0;border-radius:8px;padding:.6rem 1.2rem;cursor:pointer}</style>
 <h1>Hookline prototype</h1>
 <p>Upload a reel → attention preview in seconds. PREVIEW mode: real video/audio signals, synthetic-preview brain stand-in. Full TRIBE run via Colab upgrades the same report schema.</p>
-<div class=card><h3>1. Try instant demo</h3><p><a href="/demo"><button>Open sneaker demo report</button></a></p>
+<div class=card><h3>1. Try instant demo</h3><p><a href="/demo"><button>Open sneaker demo report</button></a>
+<a href="/reports"><button>All reports (live)</button></a></p>
 <p class=muted>Precomputed 28s 9:16 reel: hook 61.4, drops 0:09–0:13 + 0:26–0:29.</p></div>
 <div class=card><h3>2. Upload your reel</h3>
 <form id=f><input type=file name=video accept="video/*" required> <button>Analyze</button></form>
@@ -285,6 +286,43 @@ def _transcript_html(r: dict) -> str:
     return head + f'<ul class=transcript>{rows}</ul>'
 
 
+@app.get("/reports", response_class=HTMLResponse)
+def list_reports():
+    """All saved reports, newest first; refreshes itself so batch results appear as they land."""
+    import html
+    rows = []
+    for p in sorted(OUT.glob("*/report.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            r = json.loads(p.read_text())
+            s = r["scores"]
+        except Exception:
+            continue
+        job = p.parent.name
+        name = r.get("source_id") or Path(r.get("local_video") or "").stem or job
+        full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
+        audio = (r.get("audio") or {}).get("type") or "-"
+        song = (r.get("audio") or {}).get("song")
+        rows.append(f'<tr><td><a href="/report/{job}/view">{html.escape(name if name != "input" else job)}</a></td>'
+                    f'<td>{"full TRIBE" if full else "preview"}</td>'
+                    f'<td><b>{s["virality"]:.0f}</b> {html.escape(s.get("virality_tag", s.get("virality_band", "")))}</td>'
+                    f'<td>{s["hook_pct"]:.0f}</td><td>{s["hold_rate_pct"]:.0f}%</td><td>{s["finish_pct"]:.0f}%</td>'
+                    f'<td>{html.escape(audio)}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
+                    f'<td class=muted>{r.get("duration_s", "?")}s</td>'
+                    f'<td class=muted>{__import__("time").strftime("%H:%M", __import__("time").localtime(p.stat().st_mtime))}</td></tr>')
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<meta http-equiv=refresh content=5><title>Hookline reports</title>
+<style>:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--accent:#2563eb}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--accent:#60a5fa}}}}
+body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
+a{{color:var(--accent)}} .muted{{color:var(--muted)}} table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
+th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
+.wrap{{overflow-x:auto}}</style>
+<h1>Hookline reports <span class=muted style=font-weight:400>({len(rows)}, refreshes every 5s)</span></h1>
+<p class=muted>Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a></p>
+<div class=wrap><table><tr><th>Reel</th><th>Run</th><th>Viral potential</th><th>Hook</th><th>Hold</th><th>Finish</th>
+<th>Audio</th><th>Length</th><th>Saved</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
+
+
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
 def view_report(job_id: str):
     import html
@@ -300,7 +338,7 @@ def view_report(job_id: str):
         HL.write_md(r, md)  # Space jobs may come back without markdown; it only needs report.json
     png = OUT / job_id / "report.png"
     png_html = (f'<details><summary>Full chart (PNG)</summary><img src="/report/{job_id}.png" alt="chart"></details>'
-                if _is_png(png) else "")
+                if _is_png(png) and HL.SHOW_SUGGESTIONS else "")
     gate = r.get("speech_gate")
     audio = r.get("audio") or {}
     gate_html = ""
