@@ -74,10 +74,11 @@ def _clip(frames, device):
             iin = proc(images=frames[i:i + 32], return_tensors="pt").to(device)
             imf = model.get_image_features(**iin)
             imf = imf / imf.norm(dim=-1, keepdim=True)
-            sim = (100.0 * imf @ tf.T).reshape(len(frames[i:i + 32]), len(labels), 2).mean(-1)
-            out.append(torch.softmax(sim, dim=-1).cpu().numpy())
+            sim = (imf @ tf.T).reshape(len(frames[i:i + 32]), len(labels), 2).mean(-1)
+            out.append(sim.float().cpu().numpy())
     p = np.concatenate(out) if out else np.zeros((0, len(labels)))
-    return {k: [round(float(x), 3) for x in p[:, j]] for j, k in enumerate(labels)}
+    # raw cosine similarities: a softmax here (x100) was one-hot and lost the nuance after rounding
+    return {"sim": {k: [round(float(x), 4) for x in p[:, j]] for j, k in enumerate(labels)}}
 
 
 def _voice(audio, sr, speech_prob, device):
@@ -148,10 +149,10 @@ def _music(audio16k, n, device):
             ain = proc(audios=clips[i:i + 16], sampling_rate=sr, return_tensors="pt").to(device)
             af = model.get_audio_features(**ain)
             af = af / af.norm(dim=-1, keepdim=True)
-            sim = (100.0 * af @ tf.T).reshape(len(clips[i:i + 16]), len(moods), 2).mean(-1)
-            out.append(torch.softmax(sim, dim=-1).cpu().numpy())
+            sim = (af @ tf.T).reshape(len(clips[i:i + 16]), len(moods), 2).mean(-1)
+            out.append(sim.float().cpu().numpy())
     p = np.concatenate(out) if out else np.zeros((0, len(moods)))
-    return {m: [round(float(x), 3) for x in p[:, j]] for j, m in enumerate(moods)}
+    return {"sim": {m: [round(float(x), 4) for x in p[:, j]] for j, m in enumerate(moods)}}
 
 
 def _text(segments, n, device):

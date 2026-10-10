@@ -34,6 +34,24 @@ MUSIC_MAP = {"sad": {"sadness": 1.0}, "uplifting": {"warmth": 0.5, "awe": 0.5}, 
 VISUAL_TEMPER = 0.5  # flattens CLIP's sharp softmax so one prompt can't take every second
 
 
+# Zero-shot channels (CLIP visual, CLAP music) arrive as raw cosine similarities; the softness
+# of the softmax is ours to tune here (older reports carry probabilities and are used as-is).
+ZS_SCALE = {"visual": 40.0, "music": 40.0}
+
+
+def zero_shot_probs(cue, keys, n, scale):
+    """{key: per-second prob} from raw similarities ({"sim": {...}}) or legacy probabilities."""
+    if not cue:
+        return {}
+    if "sim" in cue:
+        S = np.array([_seconds(cue["sim"].get(k), n, 0.0) for k in keys], dtype=float).T * scale
+        S = S - S.max(1, keepdims=True)
+        P = np.exp(S)
+        P = P / P.sum(1, keepdims=True)
+        return {k: P[:, j] for j, k in enumerate(keys)}
+    return {k: np.array(_seconds(cue.get(k), n, 0.0), dtype=float) for k in keys}
+
+
 def _seconds(x, n, default=None):
     x = list(x or [])
     return (x + [default] * n)[:n]
@@ -50,12 +68,14 @@ def fuse(report, extra):
     weight = np.zeros(n)
     used = []
 
-    vis = cues.get("visual") or {}
-    if vis:
+    vis_raw = cues.get("visual") or {}
+    if vis_raw:
         used.append("visual")
-        # CLIP's softmax (logit scale 100) is winner-take-all; temper it (p^0.5, renormalised)
         keys = EMOTIONS + ["neutral"]
-        P = np.array([_seconds(vis.get(k), n, 0.0) for k in keys], dtype=float).T ** VISUAL_TEMPER
+        vp = zero_shot_probs(vis_raw, keys, n, ZS_SCALE["visual"])
+        P = np.array([vp[k] for k in keys]).T
+        if "sim" not in vis_raw:  # legacy softmax(x100) probabilities: temper them instead
+            P = P ** VISUAL_TEMPER
         P = P / np.maximum(P.sum(1, keepdims=True), 1e-9)
         dist += CHANNEL_WEIGHT["visual"] * P[:, :len(EMOTIONS)]
         weight += CHANNEL_WEIGHT["visual"] * (1 - P[:, -1])
@@ -72,12 +92,12 @@ def fuse(report, extra):
                 dist[t] += CHANNEL_WEIGHT["text"] * mass * row / row.sum()
                 weight[t] += CHANNEL_WEIGHT["text"] * mass
 
-    music = cues.get("music") or {}
-    if music:
+    music_raw = cues.get("music") or {}
+    if music_raw:
         used.append("music")
-        keys = list(music)
-        M = np.array([_seconds(music.get(k), n, 0.0) for k in keys], dtype=float).T ** VISUAL_TEMPER
-        M = M / np.maximum(M.sum(1, keepdims=True), 1e-9)
+        keys = list(music_raw.get("sim", music_raw))
+        mp = zero_shot_probs(music_raw, keys, n, ZS_SCALE["music"])
+        M = np.array([mp[k] for k in keys]).T
         for j, k in enumerate(keys):
             for e, w in MUSIC_MAP.get(k, {}).items():
                 dist[:, EMOTIONS.index(e)] += CHANNEL_WEIGHT["music"] * w * M[:, j]
@@ -135,10 +155,12 @@ def fuse(report, extra):
     }
     strong = strong_emotions(extra, n)
     block["strong"] = strong
-    music = cues.get("music") or {}
-    if music:  # music mood mix + its order over time (e.g. sad -> uplifting)
-        keys = [k for k in music if k not in ("none",)]
-        M = np.array([_seconds(music.get(k), n, 0.0) for k in keys], dtype=float).T
+    music_raw = cues.get("music") or {}
+    if music_raw:  # music mood mix + its order over time (e.g. sad -> uplifting)
+        allk = list(music_raw.get("sim", music_raw))
+        mp = zero_shot_probs(music_raw, allk, n, ZS_SCALE["music"])
+        keys = [k for k in allk if k != "none"]
+        M = np.array([mp[k] for k in keys]).T
         top = [keys[i] for i in M.argmax(1)]
         from collections import Counter
         c = Counter(top)
@@ -168,13 +190,16 @@ def strong_emotions(extra, n):
     from scipy.signal import find_peaks
     em = (extra or {}).get("emotion") or {}
     snd = ((extra or {}).get("speech_gate") or {}).get("sounds_per_second") or {}
-    vis = em.get("visual") or {}
+    vis_raw = em.get("visual") or {}
+    vis = zero_shot_probs(vis_raw, EMOTIONS + ["neutral"], n, ZS_SCALE["visual"])
+    mus_raw = em.get("music") or {}
+    mus = zero_shot_probs(mus_raw, list(mus_raw.get("sim", mus_raw)), n, ZS_SCALE["music"])
     text = (em.get("text") or {}).get("probs") or []
 
     def ser(x, d=0.0):
-        return np.array([(d if v is None else v) for v in (list(x or []) + [d] * n)[:n]], dtype=float)
+        x = [] if x is None else list(x)
+        return np.array([(d if v is None else v) for v in (x + [d] * n)[:n]], dtype=float)
 
-    mus = em.get("music") or {}
     txt = {e: np.clip(np.array([sum((d or {}).get(k, 0) * w for k, w in GO_MAP[e].items()) if d else 0.0
                                 for d in (list(text) + [None] * n)[:n]]), 0, 1) for e in EMOTIONS}
     voice = ser((em.get("voice") or {}).get("arousal"))
