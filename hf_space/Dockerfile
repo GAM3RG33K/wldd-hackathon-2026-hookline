@@ -6,10 +6,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTORCH_ENABLE_MPS_FALLBACK=1 \
     HF_HUB_VERBOSITY=warning
 
+# Layer 1: OS deps (stable — cached across builds)
 RUN apt-get update -qq && apt-get install -y -qq git ffmpeg unzip wget curl > /dev/null \
  && rm -rf /var/lib/apt/lists/*
 
-# punkt tokenizer (tribev2 event transforms need it)
+# Layer 2: punkt tokenizer (stable — cached)
 RUN mkdir -p /root/nltk_data/tokenizers \
  && cd /root/nltk_data/tokenizers \
  && wget -q https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip \
@@ -17,9 +18,25 @@ RUN mkdir -p /root/nltk_data/tokenizers \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -q torch torchaudio --index-url https://download.pytorch.org/whl/cu121 \
- && pip install --no-cache-dir -q -r requirements.txt \
- && pip install --no-cache-dir -q "git+https://github.com/facebookresearch/tribev2.git" faster-whisper
+
+# Layer 3: torch trio pinned (stable — cached; touch only to change CUDA/torch)
+RUN pip install --no-cache-dir -q torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Layer 4: app deps + tribev2 at pinned SHA; transformers<5 because 5.x needs torch>=2.6
+# (AutoModel import fails on torch 2.5.1) (re-runs only when requirements.txt
+# or the SHA below changes; pip keeps layer-3 torch since it already satisfies)
+RUN pip install --no-cache-dir -q -r requirements.txt \
+ && pip install --no-cache-dir -q "git+https://github.com/facebookresearch/tribev2.git@af58661791a351a448a489042a28f6c37e1c14b7" faster-whisper \
+    "transformers>=4.46,<5" \
+ && python -c "import torch, torchaudio, torchvision; import transformers; from transformers import AutoModel; print('torch', torch.__version__, '| ta', torchaudio.__version__, '| tv', torchvision.__version__, '| transformers', transformers.__version__)"
+
+# Runtime tuning, kept below the pip layers so changing it doesn't reinstall torch.
+# Whisper base: ~3x faster than small, multilingual (reels may be Hindi/Hinglish).
+# 10s chunks + expandable segments: fixes the T4 OOM on a 28s reel.
+ENV TRIBE_WHISPER_MODEL=base \
+    HOOKLINE_CHUNK_S=10 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 COPY tribe_analyze.py hookline_report.py app.py ./
 
