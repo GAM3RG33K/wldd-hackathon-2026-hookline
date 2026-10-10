@@ -21,7 +21,7 @@ import shutil
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +56,10 @@ HEARTBEAT_S = 20
 # extraction. tribev2 defaults to 30-60s chunks, which put a whole reel through
 # Wav2VecBert attention at once and ran a T4 out of memory on a 28s video.
 CHUNK_S = float(os.environ.get("HOOKLINE_CHUNK_S", "10"))
+# Speed: fp16 weights + autocast (T4 fp16 tensor cores are ~8x fp32), and keep feature
+# models on the GPU between jobs while allocated memory stays under KEEP_GB.
+PRECISION = os.environ.get("HOOKLINE_PRECISION", "fp16")  # fp16 | fp32
+KEEP_GB = float(os.environ.get("HOOKLINE_KEEP_GB", "9"))   # 0 = always free (tribev2 default)
 CURRENT = {"job": None}       # job holding the GPU lock (one at a time)
 _TLS = threading.local()      # nesting guard for timed extractor.prepare()
 
@@ -198,6 +202,8 @@ def progress(job_id: str) -> dict:
     out["video_chunk"] = job.get("video_chunk")
     out["chunks_done"] = job.get("chunks_done", [])
     out["heartbeat"] = job.get("heartbeat")
+    out["transcript"] = job.get("transcript")
+    out["model_loads"] = job.get("model_loads", [])
     out["mem"] = _mem()
     return out
 
@@ -378,6 +384,66 @@ def _publish_chunks(events):
             jlog(job_id, f"  {kind.lower()} split into {len(spans)} chunks: {', '.join(spans)}")
 
 
+def transcript_done(model: str, device: str, audio_s: float, took: float):
+    """Called from the patched tribev2 transcription (proves the fast path ran)."""
+    job_id = CURRENT["job"]
+    msg = f"whisper {model} on {device}: {audio_s:.1f}s audio in {took:.1f}s"
+    print(f"[space] {job_id} {msg}", flush=True)
+    if job_id:
+        jlog(job_id, f"  {msg}")
+        JOBS[job_id]["transcript"] = {"model": model, "device": device, "audio_s": round(audio_s, 1),
+                                      "took_s": round(took, 1)}
+
+
+def _install_speed_hooks():
+    """fp16 model loading (timed) + keep feature models resident on the GPU."""
+    import transformers
+    import tribev2.main as tm
+
+    orig_fp = transformers.PreTrainedModel.from_pretrained.__func__
+
+    def from_pretrained(cls, *a, **k):
+        if PRECISION == "fp16" and torch.cuda.is_available() and "torch_dtype" not in k and "dtype" not in k:
+            k["torch_dtype"] = torch.float16
+        t0 = time.time()
+        m = orig_fp(cls, *a, **k)
+        name = a[0] if a else k.get("pretrained_model_name_or_path", cls.__name__)
+        msg = f"loaded {name} ({k.get('torch_dtype', 'default dtype')}) in {time.time() - t0:.1f}s"
+        print(f"[space] {msg}", flush=True)
+        if CURRENT["job"]:
+            jlog(CURRENT["job"], f"  {msg}")
+            JOBS[CURRENT["job"]].setdefault("model_loads", []).append(
+                {"model": str(name), "took_s": round(time.time() - t0, 1)})
+        return m
+
+    transformers.PreTrainedModel.from_pretrained = classmethod(from_pretrained)
+
+    orig_free = tm._free_extractor_model
+
+    def maybe_free(extractor):
+        gb = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
+        name = type(extractor).__name__
+        if KEEP_GB > 0 and gb <= KEEP_GB:
+            if CURRENT["job"]:
+                jlog(CURRENT["job"], f"  keeping {name} on GPU ({gb:.1f} GB allocated, budget {KEEP_GB:.0f})")
+            return
+        orig_free(extractor)
+
+    tm._free_extractor_model = maybe_free
+    tm._orig_free_extractor_model = orig_free
+    print(f"[space] speed hooks: precision {PRECISION}, keep models <= {KEEP_GB} GB", flush=True)
+
+
+def free_kept_models(model):
+    """Drop every resident feature model (OOM recovery)."""
+    import tribev2.main as tm
+    free = getattr(tm, "_orig_free_extractor_model", tm._free_extractor_model)
+    for m in getattr(model.data, "features_to_use", []):
+        ext = getattr(model.data, f"{m}_feature", None)
+        if ext is not None:
+            free(ext)
+
+
 def _install_timing_hooks():
     """Patch tribev2/neuralset so each event transform and feature extractor is timed."""
     import tribev2.demo_utils as du
@@ -452,10 +518,12 @@ def _patch_fast_transcript():
         s = p.read_text()
         if "_FW_MODEL" in s:
             print("[space] fast-transcript patch already present", flush=True)
+            BOOT["transcript"] = "faster-whisper (already patched)"
             return
         marker = '        device = "cuda" if torch.cuda.is_available() else "cpu"\n        compute_type'
         if marker not in s:
             print("[space] WARN: eventstransforms marker not found, keeping whisperx path", flush=True)
+            BOOT["transcript"] = "WARN: marker missing, slow uvx whisperx path"
             return
         fast = """        try:
             global _FW_MODEL
@@ -472,8 +540,13 @@ def _patch_fast_transcript():
             segs, _ = _FW_MODEL.transcribe(_audio, language=language_codes[language], word_timestamps=True,
                                            beam_size=1, vad_filter=True)
             segs = list(segs)
-            print(f"[space] whisper {os.environ.get('TRIBE_WHISPER_MODEL', 'base')}: "
-                  f"{len(_audio) / 16000:.1f}s audio in {_time.time() - _t0:.1f}s", flush=True)
+            try:
+                import sys as _sys
+                _sys.modules["app"].transcript_done(os.environ.get("TRIBE_WHISPER_MODEL", "base"),
+                                                    str(_FW_MODEL.model.device), len(_audio) / 16000,
+                                                    _time.time() - _t0)
+            except Exception:
+                pass
             words = []
             for i, seg in enumerate(segs):
                 for w in (seg.words or []):
@@ -489,8 +562,10 @@ def _patch_fast_transcript():
             s = "import os\n" + s
         p.write_text(s)
         print("[space] fast-transcript patch applied", flush=True)
+        BOOT["transcript"] = f"faster-whisper {os.environ.get('TRIBE_WHISPER_MODEL', 'base')}"
     except Exception as e:  # noqa: BLE001 - transcription fallback must not kill boot
         print(f"[space] WARN: transcript patch skipped ({e})", flush=True)
+        BOOT["transcript"] = f"WARN: patch failed ({e}), slow uvx whisperx path"
 
 
 @app.on_event("startup")
@@ -522,7 +597,7 @@ def load_model():
     overrides = {f"data.{m}.device": DEVICE for m in
                  ("text_feature", "audio_feature", "video_feature.image", "image_feature.image")}
     MODEL = TribeModel.from_pretrained("facebook/tribev2", device=DEVICE, config_update=overrides)
-    for hook in (_install_timing_hooks, _install_progress_loops):
+    for hook in (_install_speed_hooks, _install_timing_hooks, _install_progress_loops):
         try:
             hook()
         except Exception as e:  # noqa: BLE001 - progress must never break inference
@@ -558,7 +633,7 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
             set_step(job_id, "predict")
             t1 = time.time()
             n_before = len(j.get("substeps", []))
-            preds, segments = model.predict(events=events)
+            preds, segments = _predict(job_id, model, events)
             preds = np.asarray(preds)
             took = time.time() - t1
             feats = sum(x["took_s"] for x in j.get("substeps", [])[n_before:])
@@ -577,6 +652,36 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
                 torch.cuda.empty_cache()  # a stopped job leaves activations behind
 
 
+def _autocast():
+    if PRECISION == "fp16" and torch.cuda.is_available():
+        return torch.autocast("cuda", dtype=torch.float16)
+    return nullcontext()
+
+
+def _predict(job_id: str, model, events):
+    """model.predict under fp16 autocast. On CUDA OOM with resident models, free them,
+    stop keeping models for this process, and retry once."""
+    global KEEP_GB
+    ctx = _autocast()
+    try:
+        with ctx:
+            return model.predict(events=events)
+    except Exception as e:  # noqa: BLE001 - only OOM is retried
+        if "out of memory" not in str(e).lower() or KEEP_GB <= 0:
+            raise
+        jlog(job_id, f"CUDA OOM with resident models ({e.__class__.__name__}); freeing them, "
+                     "disabling keep, retrying predict once")
+        KEEP_GB = 0
+        free_kept_models(model)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        JOBS[job_id].pop("video_chunk_i", None)
+        JOBS[job_id].pop("chunks_done", None)
+        ctx = _autocast()
+        with ctx:
+            return model.predict(events=events)
+
+
 def _write_outputs(job_id, job, video, source_name, preds, segments):
     times = np.array([float(getattr(s, "start", i)) for i, s in enumerate(segments)])
     times = times - times.min() if len(times) else times
@@ -588,6 +693,7 @@ def _write_outputs(job_id, job, video, source_name, preds, segments):
         "transcript": str(tsv) if tsv.exists() else None,
         "n_steps": int(preds.shape[0]), "space_device": DEVICE,
         "chunk_s": CHUNK_S, "whisper_model": os.environ.get("TRIBE_WHISPER_MODEL", "base"),
+        "precision": PRECISION, "keep_gb": KEEP_GB,
         "timings": JOBS[job_id].get("substeps", []),
     }))
     report, d = HL.analyse(job, video)
@@ -621,7 +727,9 @@ def health():
     return {"ok": True, "device": DEVICE, "model_loaded": MODEL is not None,
             "method": "heuristic, within-video normalised, uncalibrated",
             "jobs": len(JOBS), "busy": GPU_LOCK.locked(), "mem": _mem(),
-            "scale": {k: round(v, 2) for k, v in SCALE.items()}, "boot": BOOT}
+            "scale": {k: round(v, 2) for k, v in SCALE.items()},
+            "speed": {"precision": PRECISION, "keep_gb": KEEP_GB, "chunk_s": CHUNK_S,
+                      "whisper": os.environ.get("TRIBE_WHISPER_MODEL", "base")}, "boot": BOOT}
 
 
 @app.post("/analyze")

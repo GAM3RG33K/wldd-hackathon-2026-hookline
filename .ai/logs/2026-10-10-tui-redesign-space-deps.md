@@ -55,3 +55,34 @@
 - Transcription: faster-whisper `small` replaced by `base` (multilingual, about 3x faster),
   `int8_float16`, greedy decoding (beam 1) and VAD filter. Override with `TRIBE_WHISPER_MODEL`.
 - Runtime ENV moved below the pip layers in the Dockerfile so tuning doesn't reinstall torch.
+
+## Sneaker 28s run 2 (job df75072d): first full report, 20m14s on t4-small
+- Scores: hook 23.3 (Bad), hold 40.9, finish 9.5, virality 35.5 (Weak). The preview had
+  hook 61.4 and virality 50.7, so the synthetic preview brain differs a lot from TRIBE.
+- Time: load 4s, events 111s (transcribe 97s, add_text 13s), text features (Llama-3.2-3B)
+  270s, Wav2VecBert 8s (no OOM with 10s chunks), video features (V-JEPA2-g, 64 frames per
+  clip, 2 Hz) about 810s, which is 67% of the total.
+- ETA bug: once a step ran past its plan, the ETA was floored at 5s + 11s for the report, so
+  it showed "16s" forever. Fixed: video ETA = time left in the current chunk + remaining chunks
+  x average chunk time; other loops use their rate; past the plan with no live signal the ETA
+  is reported as unknown together with the overrun. Priors refit from this run (predict 30s +
+  40s per video second).
+- Chunk visibility: neuralset's V-JEPA path loops over chunks without tqdm, only over frame
+  steps ("Encoding video"). Each such loop is now counted as `video chunk i/n start-end`.
+  Heartbeats moved out of the log tail (it had filled with them). `/jobs/{id}` serves
+  progress after the job is done.
+- Stop/restart: cooperative cancel at every step, sub-step and loop item
+  (`POST /jobs/{id}/cancel`); restart re-queues the same upload (`POST /jobs/{id}/restart`).
+  Tested locally: stops within 0.3s mid-loop. TUI: `x` stop, `ctrl+r` restart.
+
+## Speed round 1 (deployed 433e000, verification run pending)
+- fp16: `PreTrainedModel.from_pretrained` defaults to float16 on CUDA unless a dtype is
+  passed, and predict runs under `torch.autocast(fp16)`. Neuralset loads Llama, V-JEPA2,
+  DINOv2 and Wav2VecBert in fp32 by default. Env `HOOKLINE_PRECISION=fp32` reverts.
+- Resident models: tribev2's `_free_extractor_model` is now a no-op while allocated GPU
+  memory is at most `HOOKLINE_KEEP_GB` (9). On CUDA OOM, free them, set keep to 0 for the
+  process, and retry predict once.
+- Transcription proof: `/health.boot.transcript` shows whether the faster-whisper patch
+  applied, and each job logs `whisper <model> on <device>: Xs audio in Ys`.
+- Every HF model load is logged with its time (`model_loads`), so load and compute can be
+  separated.
