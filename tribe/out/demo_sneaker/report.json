@@ -1,0 +1,135 @@
+{
+ "video": "tribe/samples/sneaker.mp4",
+ "duration_s": 28.33,
+ "method": "heuristic, within-video normalised, uncalibrated",
+ "scores": {
+  "hook_pct": 61.4,
+  "hook_band": "Average",
+  "hold_rate_pct": 35.9,
+  "finish_pct": 22.0,
+  "avg_attention": 49.4,
+  "virality": 50.7,
+  "virality_band": "Average"
+ },
+ "moments": {
+  "peak_hook_at_s": 13,
+  "peak_attention_at_s": 15,
+  "strongest_window_s": [
+   14,
+   17
+  ],
+  "weakest_window_s": [
+   10,
+   13
+  ],
+  "drop_zones_s": [
+   [
+    9,
+    13
+   ],
+   [
+    26,
+    29
+   ]
+  ]
+ },
+ "network_mean_response": {
+  "visual": 0.2629,
+  "auditory": 0.2793,
+  "language": 0.2604,
+  "attention": 0.2475,
+  "default_mode": 0.2691
+ },
+ "recommendations": [
+  {
+   "at": "0:00-0:03",
+   "issue": "no spoken line in the first 1.5s",
+   "fix": "Start with the claim, question or payoff line inside the first second."
+  },
+  {
+   "at": "0:00-0:03",
+   "issue": "static opening: no cut or strong movement in the first 2s",
+   "fix": "Add a cut, zoom or movement in the first 2s, or open on the most striking frame."
+  },
+  {
+   "at": "0:09-0:13",
+   "issue": "attention drops (no visual change, flat audio, no speech)",
+   "fix": "Re-hook: add a cut, zoom or b-roll; add a sound hit or music lift; tease what is coming or ask a question."
+  },
+  {
+   "at": "0:26-0:29",
+   "issue": "attention drops (no visual change, low movement, no speech)",
+   "fix": "Re-hook: add a cut, zoom or b-roll; tease what is coming or ask a question."
+  },
+  {
+   "at": "0:26-0:29",
+   "issue": "weak ending",
+   "fix": "End on a payoff or loop back to the opening so viewers rewatch."
+  }
+ ],
+ "series": {
+  "attention": [
+   31.8,
+   63.5,
+   66.7,
+   44.5,
+   36.8,
+   40.3,
+   43.6,
+   48.2,
+   45.7,
+   24.7,
+   8.0,
+   7.6,
+   21.9,
+   63.6,
+   92.2,
+   95.3,
+   90.4,
+   74.0,
+   58.3,
+   55.1,
+   52.5,
+   53.7,
+   61.0,
+   65.3,
+   55.3,
+   41.5,
+   34.6,
+   29.9,
+   25.3
+  ],
+  "survival_pct": [
+   87.1,
+   74.3,
+   61.4,
+   58.8,
+   56.0,
+   53.5,
+   51.2,
+   49.2,
+   47.2,
+   44.5,
+   41.5,
+   38.7,
+   36.4,
+   35.4,
+   35.2,
+   34.9,
+   34.6,
+   34.0,
+   32.9,
+   31.8,
+   30.7,
+   29.7,
+   28.8,
+   28.1,
+   27.1,
+   25.9,
+   24.6,
+   23.3,
+   22.0
+  ],
+  "cuts_s": []
+ }
+}

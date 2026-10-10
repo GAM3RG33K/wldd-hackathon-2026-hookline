@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.env
+.env.*
+
+# Hackathon dataset (provided for hackathon only, do not redistribute)
+samples/
+
+# Videos, weights, preds (never commit large artifacts)
+*.mp4
+*.mov
+*.npy
+*.pt
+*.ckpt
+*.safetensors
+
+# Job outputs; keep only the precomputed demo fallback reports
+backend/out/*
+!backend/out/demo/
+tribe/out/*
+!tribe/out/demo_sneaker/
+tribe/out/demo_sneaker/*
+!tribe/out/demo_sneaker/report.json
+!tribe/out/demo_sneaker/report.md
+!tribe/out/demo_sneaker/report.png
+!tribe/out/demo_sneaker/meta.json
+
+# Upstream clone (facebookresearch/tribev2), install from source instead
+tribe/repo/

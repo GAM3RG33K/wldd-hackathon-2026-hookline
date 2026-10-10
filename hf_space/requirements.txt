@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+numpy<2
+pandas
+matplotlib
+nilearn
+huggingface_hub>=0.24
+requests
+uv
