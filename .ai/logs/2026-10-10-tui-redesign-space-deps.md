@@ -239,3 +239,15 @@
   for both the Space and local builds.
 - The calibration chain was stopped at [8/20]. The 7 outlier reports had no raw output, so they
   were removed and all 20 reels are being re-run, now with raw output stored.
+
+## Calibration run complete (20 reels, all built locally from raw TRIBE output)
+- Groups: 10 outliers (10M-315M views; 6 face / 4 faceless) vs the 10 lowest-view reels
+  (2k-12k; 7 face / 3 faceless). The page types are roughly balanced, so the face/faceless
+  confound is small.
+- Effect sizes (Cohen's d, viral minus low): net_visual -0.97, net_language +0.81, motion -0.76,
+  peak_gap_cv -0.71 (viral peaks are more evenly spaced), net_attention -0.61, peaks +0.60,
+  peaks_per_window +0.59, cuts_per_s -0.54, hook_lift +0.45, hook +0.42. Avg engagement +0.18
+  and drop_share +0.13 are near zero.
+- Dry-run L2 logistic fit on the top 5 features: leave-one-out accuracy 65% (chance 50%).
+  n=10 vs 10, so the 95% interval on each d is roughly +-0.9: directional evidence only.
+- Not applied yet; it is waiting for the user's decision. The Space scorer was synced after the batch (1c3f1e7).
