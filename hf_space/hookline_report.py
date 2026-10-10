@@ -192,8 +192,12 @@ def analyse(out_dir, video=None):
     cut_ps = per_second(np.ones(len(cuts)), cuts, T, how="sum")
     motion = motion_signal(video, T)
     words_ps, first_word, words = word_signal(meta.get("transcript"), T)
-    S = zs(np.mean([zs(smooth(cut_ps)), zs(motion), zs(np.maximum(db, CFG["silence_db"])),
-                    zs(smooth(words_ps))], axis=0))
+    # Transcription can be switched off per job: then speech is unknown, not absent.
+    speech_known = meta.get("modalities", {}).get("text", True)
+    sig = [zs(smooth(cut_ps)), zs(motion), zs(np.maximum(db, CFG["silence_db"]))]
+    if speech_known:
+        sig.append(zs(smooth(words_ps)))
+    S = zs(np.mean(sig, axis=0))
 
     # -- combined per-second attention
     A_z = zs(smooth(CFG["w_neural"] * N + CFG["w_signal"] * S))
@@ -207,7 +211,7 @@ def analyse(out_dir, video=None):
     speech_early = first_word is not None and first_word <= 1.5
     if speech_early:
         bonus += 0.3
-    else:
+    elif speech_known:
         notes.append("no spoken line in the first 1.5s")
     if cuts and min(cuts) <= 2.0 or motion[:2].max() > np.median(motion) * 1.3:
         bonus += 0.3
@@ -271,7 +275,7 @@ def analyse(out_dir, video=None):
             why.append("low movement")
         if db[seg].std() < 2.0:
             why.append("flat audio")
-        if words_ps[seg].sum() == 0:
+        if speech_known and words_ps[seg].sum() == 0:
             why.append("no speech")
         fix = "Re-hook: " + ("add a cut, zoom or b-roll; " if "no visual change" in why or "low movement" in why else "") \
               + ("add a sound hit or music lift; " if "flat audio" in why else "") \

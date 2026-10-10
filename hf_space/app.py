@@ -1,6 +1,8 @@
 """Hookline TRIBE Space: plain REST (POST video, GET report).
 
   POST /analyze  (multipart video) -> {job_id, status}
+       ?video=1&audio=1&text=0      modalities to run (defaults: video+audio on,
+                                    transcription/text off; TRIBE zero-fills the rest)
   GET  /report/{job_id}            -> progress (stage, step/steps, elapsed_s, eta_s,
                                       timeout_s, log tail, mem) or full report.json
   GET  /report/{job_id}.png / .md -> chart / markdown
@@ -26,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from fastapi import BackgroundTasks, FastAPI, File, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 import hookline_report as HL
@@ -49,6 +51,11 @@ STEPS = [
     ("report", "Scoring + writing report", 5.0, 0.2),
 ]
 AFTER_VIDEO_S = 30.0  # loaders + inference after the last video chunk (rough)
+# Per-modality share of the per-video-second cost (fp16 run 794fe136: video ~8s, text ~2.5s,
+# audio ~0.3s per video second; transcription ~3.5s per video second in events).
+MODALITY_COST = {"video": 8.0, "text": 2.5, "audio": 0.3}
+TRANSCRIBE_COST = 3.5
+DEFAULT_MODALITIES = {"video": True, "audio": True, "text": False}
 SCALE = {k: 1.0 for k, *_ in STEPS}
 LOG_TAIL = 60
 HEARTBEAT_S = 20
@@ -59,7 +66,9 @@ CHUNK_S = float(os.environ.get("HOOKLINE_CHUNK_S", "10"))
 # Speed: fp16 weights + autocast (T4 fp16 tensor cores are ~8x fp32), and keep feature
 # models on the GPU between jobs while allocated memory stays under KEEP_GB.
 PRECISION = os.environ.get("HOOKLINE_PRECISION", "fp16")  # fp16 | fp32
-KEEP_GB = float(os.environ.get("HOOKLINE_KEEP_GB", "9"))   # 0 = always free (tribev2 default)
+# 4 GB keeps V-JEPA2 (~2 GB fp16) + Wav2VecBert (~1.2 GB); Llama (~6.4 GB) is freed after use.
+# 9 GB (Llama + w2v resident) ran V-JEPA out of memory on a T4 (job 794fe136).
+KEEP_GB = float(os.environ.get("HOOKLINE_KEEP_GB", "4"))   # 0 = always free (tribev2 default)
 CURRENT = {"job": None}       # job holding the GPU lock (one at a time)
 _TLS = threading.local()      # nesting guard for timed extractor.prepare()
 
@@ -104,10 +113,15 @@ def _video_seconds(path: Path) -> float:
         return 30.0
 
 
-def _estimate(key: str, video_s: float) -> float:
+def _estimate(key: str, video_s: float, mods=None) -> float:
     if key == "load_model" and MODEL is not None:
         return 0.0
+    mods = mods or DEFAULT_MODALITIES
     _, _, fixed, per_s = next(s for s in STEPS if s[0] == key)
+    if key == "events":
+        per_s = TRANSCRIBE_COST if mods.get("text") else 0.1
+    elif key == "predict":
+        per_s = sum(c for m, c in MODALITY_COST.items() if mods.get(m))
     return (fixed + per_s * video_s) * SCALE[key]
 
 
@@ -177,7 +191,7 @@ def progress(job_id: str) -> dict:
     """Public progress view: current step, elapsed, ETA, timeout, recent log lines."""
     job = JOBS[job_id]
     now = time.time()
-    out = {k: job[k] for k in ("status", "stage", "stage_label", "step", "steps", "video_s",
+    out = {k: job[k] for k in ("status", "stage", "stage_label", "step", "steps", "video_s", "modalities",
                                "error", "trace", "log", "took") if k in job}
     if "started" in job:
         out["elapsed_s"] = round(now - job["started"])
@@ -191,7 +205,8 @@ def progress(job_id: str) -> dict:
             out["overrun_s"] = round(overrun)
         out["overdue"] = out["elapsed_s"] > job["timeout_s"]
     out["timeout_s"] = job.get("timeout_s")
-    out["plan"] = [{"key": k, "label": label, "est_s": round(job.get("plan", {}).get(k, _estimate(k, job["video_s"]))),
+    out["plan"] = [{"key": k, "label": label,
+                    "est_s": round(job.get("plan", {}).get(k, _estimate(k, job["video_s"], job.get("modalities")))),
                     "took_s": job.get("took", {}).get(k)} for k, label, *_ in STEPS]
     sub = job.get("substep")
     if sub:
@@ -234,6 +249,10 @@ def _timed_audio_text_events(events, audio_only: bool = False):
     """Copy of tribev2.demo_utils.get_audio_and_text_events with per-transform timing
     and CHUNK_S chunking (OOM fix)."""
     import tribev2.demo_utils as du
+    job = JOBS.get(CURRENT["job"] or "", {})
+    if not job.get("modalities", DEFAULT_MODALITIES).get("text", True):
+        audio_only = True  # transcription off: no words, no Llama text features
+        jlog(CURRENT["job"], "  transcription off: skipping transcribe/add_text/sentences/context")
     transforms = [
         ("extract_audio", du.ExtractAudioFromVideo()),
         ("chunk_audio", du.ChunkEvents(event_type_to_chunk="Audio", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
@@ -434,6 +453,41 @@ def _install_speed_hooks():
     print(f"[space] speed hooks: precision {PRECISION}, keep models <= {KEEP_GB} GB", flush=True)
 
 
+# Which tribev2 extractors (and models) each modality needs.
+MODALITY_EXTRACTORS = {"video": ("video_feature", "image_feature"), "audio": ("audio_feature",),
+                       "text": ("text_feature",)}
+MODALITY_MODELS = {"video": "V-JEPA2 ViT-g", "audio": "Wav2Vec-BERT 2.0", "text": "Whisper + Llama-3.2-3B"}
+
+
+def release_unneeded(job_id: str, model, mods: dict):
+    """Free models kept resident by earlier jobs that this job's modalities don't use.
+    Models for enabled modalities load lazily on first use; disabled ones never load."""
+    import tribev2.main as tm
+    free = getattr(tm, "_orig_free_extractor_model", tm._free_extractor_model)
+    freed = []
+    for mod, on in mods.items():
+        if on:
+            continue
+        for attr in MODALITY_EXTRACTORS[mod]:
+            ext = getattr(model.data, attr, None)
+            targets = [ext, getattr(ext, "image", None)] if ext is not None else []
+            if any(isinstance(getattr(t, "_model", None), torch.nn.Module) for t in targets if t is not None):
+                free(ext)
+                freed.append(attr)
+    if not mods.get("text"):
+        import tribev2.eventstransforms as et
+        if getattr(et, "_FW_MODEL", None) is not None:
+            del et._FW_MODEL  # faster-whisper from an earlier transcription job
+            freed.append("whisper")
+    if freed and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    load = [MODALITY_MODELS[m] for m, on in mods.items() if on]
+    skip = [MODALITY_MODELS[m] for m, on in mods.items() if not on]
+    gb = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
+    jlog(job_id, f"models: using {', '.join(load) or 'none'}; not loading {', '.join(skip) or 'none'}"
+                 f"{'; freed resident ' + ', '.join(freed) if freed else ''} (GPU {gb:.1f} GB allocated)")
+
+
 def free_kept_models(model):
     """Drop every resident feature model (OOM recovery)."""
     import tribev2.main as tm
@@ -612,7 +666,7 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
     with GPU_LOCK:  # one video on the GPU at a time
         check_cancel(job_id)  # stopped while waiting in the queue
         j = JOBS[job_id]
-        j["plan"] = {k: _estimate(k, j["video_s"]) for k, *_ in STEPS}
+        j["plan"] = {k: _estimate(k, j["video_s"], j.get("modalities")) for k, *_ in STEPS}
         j["timeout_s"] = round(2 * sum(j["plan"].values()) + 120)
         j["started"] = time.time()
         jlog(job_id, f"started {source_name} ({j['video_s']:.1f}s video), "
@@ -623,8 +677,14 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
         try:
             set_step(job_id, "load_model")
             model = load_model()
+            release_unneeded(job_id, model, j.get("modalities", DEFAULT_MODALITIES))
             set_step(job_id, "events")
             events = model.get_events_dataframe(video_path=str(video))
+            mods = j.get("modalities", DEFAULT_MODALITIES)
+            drop = [t for m, t in (("video", "Video"), ("audio", "Audio")) if not mods.get(m)]
+            if drop:
+                events = events[~events.type.isin(drop)]
+                jlog(job_id, f"modalities off: dropped {drop} events (TRIBE zero-fills them)")
             try:
                 counts = events.type.value_counts().to_dict()
             except Exception:  # noqa: BLE001 - logging only
@@ -694,10 +754,16 @@ def _write_outputs(job_id, job, video, source_name, preds, segments):
         "n_steps": int(preds.shape[0]), "space_device": DEVICE,
         "chunk_s": CHUNK_S, "whisper_model": os.environ.get("TRIBE_WHISPER_MODEL", "base"),
         "precision": PRECISION, "keep_gb": KEEP_GB,
+        "modalities": JOBS[job_id].get("modalities", DEFAULT_MODALITIES),
         "timings": JOBS[job_id].get("substeps", []),
     }))
     report, d = HL.analyse(job, video)
     report["neural_source"] = f"tribev2-full ({DEVICE})"
+    mods = JOBS[job_id].get("modalities", DEFAULT_MODALITIES)
+    report["modalities"] = mods
+    if not all(mods.values()):
+        used = "+".join(m for m, on in mods.items() if on)
+        report["method"] += f"; partial modalities ({used}), diagnostic run"
     (job / "report.json").write_text(json.dumps(report, indent=1))
     HL.write_md(report, job / "report.md")
     HL.write_png(report, d, job / "report.png")
@@ -733,7 +799,12 @@ def health():
 
 
 @app.post("/analyze")
-async def analyze(background: BackgroundTasks, video: UploadFile = File(...)):
+async def analyze(background: BackgroundTasks, video: UploadFile = File(...),
+                  video_on: bool = Query(True, alias="video"), audio_on: bool = Query(True, alias="audio"),
+                  text_on: bool = Query(False, alias="text")):
+    mods = {"video": video_on, "audio": audio_on, "text": text_on}
+    if not any(mods.values()):
+        return JSONResponse({"error": "enable at least one of video, audio, text"}, status_code=422)
     job_id = uuid.uuid4().hex[:8]
     job = WORK / job_id
     job.mkdir(parents=True)
@@ -741,22 +812,25 @@ async def analyze(background: BackgroundTasks, video: UploadFile = File(...)):
     dest = job / f"input{ext}"
     with dest.open("wb") as f:
         shutil.copyfileobj(video.file, f)
-    return _enqueue(background, job_id, dest, video.filename or dest.name)
+    return _enqueue(background, job_id, dest, video.filename or dest.name, modalities=mods)
 
 
-def _enqueue(background: BackgroundTasks, job_id: str, dest: Path, source: str, restarted_from=None):
+def _enqueue(background: BackgroundTasks, job_id: str, dest: Path, source: str, restarted_from=None,
+             modalities=None):
+    modalities = modalities or dict(DEFAULT_MODALITIES)
     video_s = _video_seconds(dest)
-    est = sum(_estimate(k, video_s) for k, *_ in STEPS)
+    est = sum(_estimate(k, video_s, modalities) for k, *_ in STEPS)
     JOBS[job_id] = {"status": "queued", "stage": "queued", "stage_label": "Waiting for the GPU",
                     "step": 0, "steps": len(STEPS), "video_s": round(video_s, 1),
                     "input": str(dest), "source": source, "created": time.time(),
-                    "restarted_from": restarted_from}
-    jlog(job_id, f"queued {source} ({video_s:.1f}s video, est {est:.0f}s"
+                    "restarted_from": restarted_from, "modalities": modalities}
+    on = "+".join(m for m, v in modalities.items() if v)
+    jlog(job_id, f"queued {source} ({video_s:.1f}s video, modalities {on}, est {est:.0f}s"
                  f"{', restart of ' + restarted_from if restarted_from else ''}"
                  f"{', GPU busy' if GPU_LOCK.locked() else ''})")
     background.add_task(run_job, job_id, dest, source)
     return {"job_id": job_id, "status": "queued", "video_s": round(video_s, 1), "estimate_s": round(est),
-            "restarted_from": restarted_from}
+            "restarted_from": restarted_from, "modalities": modalities}
 
 
 @app.post("/jobs/{job_id}/cancel")
@@ -784,7 +858,8 @@ def restart_job(job_id: str, background: BackgroundTasks):
         jlog(job_id, "stop requested for restart")
     new_id = uuid.uuid4().hex[:8]
     (WORK / new_id).mkdir(parents=True)
-    return _enqueue(background, new_id, Path(j["input"]), j.get("source", "video"), restarted_from=job_id)
+    return _enqueue(background, new_id, Path(j["input"]), j.get("source", "video"), restarted_from=job_id,
+                    modalities=j.get("modalities"))
 
 
 @app.get("/jobs/{job_id}")

@@ -215,6 +215,8 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   o        analyse your own video file
   r        jump to a random sample reel
   w        open the selected report in the browser (chart + PNG)
+  v a t    toggle video / audio / transcript for full TRIBE runs
+           (defaults: video + audio on, transcript off; off = model never loads)
   x        stop the running Space job (exits after the current item)
   ctrl+r   restart the running Space job (no re-upload, model stays loaded)
   tab      switch between reels and report
@@ -267,6 +269,9 @@ class Hookline(App):
         Binding("r", "random", "Random reel"),
         Binding("w", "web", "Web view"),
         Binding("x", "stop", "Stop job"),
+        Binding("v", "toggle('video')", "Video", show=False),
+        Binding("a", "toggle('audio')", "Audio", show=False),
+        Binding("t", "toggle('text')", "Transcript", show=False),
         Binding("ctrl+r", "restart", "Restart job", show=False),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
@@ -280,6 +285,8 @@ class Hookline(App):
         self.backend_ok = False
         self.token = ""
         self.space_run = None  # in-flight Space job: {d, sid, t0, last_ok, p}
+        # Modalities for full TRIBE runs; disabled ones never load their model on the Space.
+        self.mods = {"video": True, "audio": True, "text": False}
 
     # ---- layout
     def compose(self) -> ComposeResult:
@@ -350,7 +357,13 @@ class Hookline(App):
         b = Text("● up", "green") if self.backend_ok else Text("○ down", "red")
         s = Text("● token", "green") if self.token else Text("○ no token", "yellow")
         t = Text.assemble(("HOOKLINE", "bold"), ("  video in → attention preview before posting", "dim"))
-        right = Text.assemble("backend ", b, "   space ", s)
+        mods = Text("   full run: ")
+        for key, name in (("video", "v video"), ("audio", "a audio"), ("text", "t transcript")):
+            on = self.mods[key]
+            mods.append(f"[{'x' if on else ' '}] {name}  ", "bold green" if on else "dim")
+        right = Text.assemble(mods, "backend ", b, "   space ", s)
+        if len(t) + len(right) + 3 > self.size.width:  # narrow terminal: drop the tagline
+            t = Text("HOOKLINE", "bold")
         pad = max(1, self.size.width - len(t) - len(right) - 2)
         self.query_one("#top", Static).update(Text.assemble(t, " " * pad, right))
 
@@ -435,7 +448,8 @@ class Hookline(App):
             (f"{views}{short_path(d['path'])}\n", "dim"),
             ("Views are validation context only; scoring judges the video, never the account.\n\n", "dim italic"),
             ("Enter / p", "bold"), "  preview report (seconds)\n",
-            ("f", "bold"), "          full TRIBE brain model on GPU Space (minutes)"))
+            ("f", "bold"), "          full TRIBE brain model on GPU Space (minutes)\n",
+            ("v a t", "bold"), "      toggle video / audio / transcript for the full run"))
 
     @on(Tree.NodeHighlighted)
     def highlighted(self, ev: Tree.NodeHighlighted):
@@ -516,12 +530,13 @@ class Hookline(App):
         mb = Path(d["path"]).stat().st_size / 1e6
         self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space …")
         try:
-            res = post_video(SPACE + "/analyze", d["path"], token=tok)
+            q = "&".join(f"{k}={int(v)}" for k, v in self.mods.items())
+            res = post_video(f"{SPACE}/analyze?{q}", d["path"], token=tok)
         except Exception as e:
             self.call_from_thread(self.say, f"Space upload failed: {e}", "red")
             return
         sid = res["job_id"]
-        run = {"d": d, "sid": sid, "t0": time.time(), "last_ok": time.time(), "p": {
+        run = {"d": d, "sid": sid, "t0": time.time(), "last_ok": time.time(), "mods": dict(self.mods), "p": {
             "status": "queued", "stage_label": "Waiting for the GPU", "step": 0, "steps": 4,
             "eta_s": res.get("estimate_s"), "video_s": res.get("video_s")}}
         self.space_run = run
@@ -615,7 +630,9 @@ class Hookline(App):
             frac = el / max(1, el + eta)
         width = 40
         filled = int(frac * width)
-        t = Text.assemble((d["id"], "bold"), ("   full TRIBE on GPU Space · job " + run["sid"] + "\n\n", "dim"))
+        mods = p.get("modalities") or run.get("mods") or {}
+        used = " + ".join(k for k, v in mods.items() if v) or "?"
+        t = Text.assemble((d["id"], "bold"), (f"   full TRIBE on GPU Space · job {run['sid']} · {used}\n\n", "dim"))
         t.append("━" * filled, "cyan")
         t.append("━" * (width - filled), "dim")
         t.append(f"  {frac * 100:3.0f}%\n", "bold")
@@ -694,6 +711,16 @@ class Hookline(App):
             for line in log[-6:]:
                 t.append(line[:150] + "\n", "dim")
         self.query_one("#title", Static).update(t)
+
+    def action_toggle(self, key):
+        new = dict(self.mods, **{key: not self.mods[key]})
+        if not any(new.values()):
+            self.say("Keep at least one of video, audio, transcript on.", "yellow")
+            return
+        self.mods = new
+        self.set_header()
+        on = " + ".join(k for k, v in self.mods.items() if v)
+        self.say(f"Full TRIBE runs will use: {on}. Models for the others are never loaded.")
 
     def action_stop(self):
         run = self.space_run

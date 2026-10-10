@@ -86,3 +86,31 @@
   applied, and each job logs `whisper <model> on <device>: Xs audio in Ys`.
 - Every HF model load is logged with its time (`model_loads`), so load and compute can be
   separated.
+
+## Speed round 1 result (job 794fe136, fp16, all modalities)
+- 634s total (10m34s) vs 1214s in fp32: 1.9x faster. Scores and moments match the fp32
+  baseline (hook 23.4 vs 23.3, everything else equal), so fp16 costs no quality.
+- Text features 270s -> 66s (42.5s of that is the Llama load). Video chunks 80-95s each
+  (17-20 frame steps at about 4.8s). Model loads: Llama 42.5s, V-JEPA2 32.4s, w2v-bert 6.4s.
+- KEEP_GB=9 kept Llama + w2v (8.3 GB), so V-JEPA went OOM on chunk 2; the fallback freed them
+  and retried, wasting 166s. KEEP_GB is now 4 (V-JEPA + w2v only).
+- Transcription is still about 95s. The proof hook never fired (an exception was swallowed in
+  the patch). Parked: the user asked to skip transcription for now.
+
+## Per-job modalities (deployed 6c32725)
+- `POST /analyze?video=1&audio=1&text=0` (defaults: video+audio on, text off). Text off
+  skips transcription and Llama; video/audio off drops those events, so tribev2 removes
+  the extractor and the model never loads. TRIBE zero-fills missing modalities
+  (model.py:188-190, trained with modality dropout).
+- At job start, resident models (and whisper) that this job doesn't need are freed.
+- Scorer: with text off, speech is treated as unknown (no "no spoken line" note, no
+  "no speech" in drops, words excluded from the signal mix). The report's `method` notes a
+  partial-modality diagnostic run.
+- Note on AGENTS.md core belief 3 (multimodal: seen+heard+said): text off drops the "said"
+  part. That's fine for diagnostics, but the final demo reports should run with all three on.
+- TUI: `v`/`a`/`t` toggle the modalities (header shows checkboxes), and they are sent with `f`.
+- Result on t4-small, video+audio (text off): run 1 (cold) 339s, run 2 (warm) 281s.
+  Video features take 269-302s (80-95s per 10s chunk), so V-JEPA2 compute sets the floor on a T4.
+  The V-JEPA2 reload took only 1.2s on the warm run (weights in page cache), so keeping
+  models loaded matters little. neuralset builds V-JEPA2 as a local variable, so it isn't kept on the extractor anyway.
+- Hardware moved to a100-large ($2.50/hr) at the user's request. Sleep time is still 48h; suggested 1800s.
