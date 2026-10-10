@@ -200,3 +200,10 @@
   player (`local_video` saved by the TUI and batch, served at /report/{id}/video) next to the
   chart, with a playhead synced to playback; a transcript section with clickable timestamps;
   and an audio line. TUI: an audio line under the moments, and the transcript under "What to change".
+- Bug (fixed): when inserting `_warm_catalog` I placed it under the `@app.on_event("startup")`
+  decorator, so `_startup` never ran. That skipped the Hinglish warm-up, the faster-whisper check
+  and the main-thread torchvision import. The batch waiter then hung on `hinglish_asr`, so no job
+  ran. Check after any deploy: `/health.boot` must contain `ok`.
+- Demo cleanup: backend/out reduced to demo/ only (removed 12 preview jobs, 27 s-* reports
+  and the summary files), plus tribe/__pycache__ and .DS_Store files. The backend on :8000 was
+  restarted with HF_TOKEN + HOOKLINE_SPACE_URL. The demo report plays tribe/samples/sneaker.mp4.

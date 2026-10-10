@@ -876,7 +876,6 @@ def _install_transcript_hook():
     print(f"[space] transcript hook: {BOOT['transcript']}", flush=True)
 
 
-@app.on_event("startup")
 def _warm_catalog():
     try:
         import audio_match as AM
@@ -886,6 +885,7 @@ def _warm_catalog():
         BOOT["trending_catalog"] = f"FAILED {type(e).__name__}: {e}"[:300]
 
 
+@app.on_event("startup")
 def _startup():
     threading.Thread(target=_warm_catalog, daemon=True).start()
     if DEFAULT_ASR == "hinglish":

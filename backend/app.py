@@ -244,7 +244,8 @@ VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 
 def _local_video(job_id: str, r: dict):
     """The reel on this machine: the path saved with the report, else the preview job's upload."""
-    for cand in (r.get("local_video"), *(OUT / job_id).glob("input.*")):
+    demo = [TRIBE / "samples" / "sneaker.mp4"] if job_id == "demo" else []  # demo report's source reel
+    for cand in (r.get("local_video"), *(OUT / job_id).glob("input.*"), *demo):
         if cand and Path(cand).is_file() and Path(cand).suffix.lower() in VIDEO_EXT:
             return Path(cand)
     return None
