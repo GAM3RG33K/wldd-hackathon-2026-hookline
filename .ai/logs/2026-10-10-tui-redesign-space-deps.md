@@ -138,3 +138,12 @@
   cancelled), w2v 3s, video 186s (7 chunks at 24-32s), loaders+inference 4s, report 3s.
   Model loads: Llama 6s, V-JEPA2 3s, w2v 2s. Scores: hook 38.0, hold 7.4, finish 2.8, virality 31.9.
   Remaining cost: video 62%, transcription 21% (still parked).
+- Transcription speed: the old fast path was spliced into tribev2's source file as text and
+  ended in `except ImportError: pass`, so any import problem silently fell back to
+  `uvx whisperx` (installs whisperx and downloads an alignment model every job; this matches
+  the steady ~60-95s). Replaced with a direct patch of `ExtractWordsFromAudio._get_transcript_from_audio`
+  from app.py: one cached faster-whisper model, greedy decoding + VAD. On any error it logs the
+  exact exception (job log, `transcript` field, `/health.boot.transcript`) and then falls back.
+  `/health.boot.faster_whisper` shows the import and ctranslate2 CUDA status. Startup no longer
+  edits site-packages. Deployed after FC021 (job 2e827081, 147s for 40.1s) finished.
+- TUI polls the Space every 1s (was 5s).

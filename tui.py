@@ -42,6 +42,7 @@ STRATA = ("face", "faceless", "outliers")
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm")
 BAND_STYLE = {"Bad": "red", "Weak": "yellow", "Average": "cyan", "Strong": "green", "Viral-grade": "green"}
 BLOCKS = " ▁▂▃▄▅▆▇█"
+POLL_S = 1.0  # Space progress poll interval; /jobs is an in-memory lookup, cheap to hit
 
 
 # ---------------------------------------------------------------- data / http
@@ -525,7 +526,7 @@ class Hookline(App):
 
     @work(thread=True, group="space")
     def run_space(self, d):
-        """Upload to the Space, then poll its progress API every 5s until done/failed."""
+        """Upload to the Space, then poll its progress API every POLL_S until done/failed."""
         tok = self.token
         mb = Path(d["path"]).stat().st_size / 1e6
         self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space …")
@@ -542,10 +543,10 @@ class Hookline(App):
         self.space_run = run
         self.call_from_thread(self.refresh_progress)
         while True:
-            time.sleep(5)
+            time.sleep(POLL_S)
             sid = run["sid"]  # ctrl+r swaps in the restarted job's id
             try:
-                r = http_json(f"{SPACE}/report/{sid}", tok, timeout=20)
+                r = http_json(f"{SPACE}/report/{sid}", tok, timeout=10)
                 run["last_ok"] = time.time()
                 if sid != run["sid"]:
                     continue  # restarted while this poll was in flight

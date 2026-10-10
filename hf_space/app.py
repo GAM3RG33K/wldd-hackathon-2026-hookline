@@ -407,15 +407,15 @@ def _publish_chunks(events):
             jlog(job_id, f"  {kind.lower()} split into {len(spans)} chunks: {', '.join(spans)}")
 
 
-def transcript_done(model: str, device: str, audio_s: float, took: float):
-    """Called from the patched tribev2 transcription (proves the fast path ran)."""
+def transcript_done(model: str, device: str, audio_s: float, took: float, n_words: int = -1):
+    """Called by the in-process transcription (proves the fast path ran)."""
     job_id = CURRENT["job"]
-    msg = f"whisper {model} on {device}: {audio_s:.1f}s audio in {took:.1f}s"
+    msg = f"whisper {model} on {device}: {audio_s:.1f}s audio -> {n_words} words in {took:.1f}s"
     print(f"[space] {job_id} {msg}", flush=True)
     if job_id:
         jlog(job_id, f"  {msg}")
-        JOBS[job_id]["transcript"] = {"model": model, "device": device, "audio_s": round(audio_s, 1),
-                                      "took_s": round(took, 1)}
+        JOBS[job_id]["transcript"] = {"path": "faster-whisper", "model": model, "device": device,
+                                      "audio_s": round(audio_s, 1), "words": n_words, "took_s": round(took, 1)}
 
 
 def _install_speed_hooks():
@@ -479,9 +479,8 @@ def release_unneeded(job_id: str, model, mods: dict):
                 free(ext)
                 freed.append(attr)
     if not mods.get("text"):
-        import tribev2.eventstransforms as et
-        if getattr(et, "_FW_MODEL", None) is not None:
-            del et._FW_MODEL  # faster-whisper from an earlier transcription job
+        if _FW:
+            _FW.clear()  # faster-whisper from an earlier transcription job
             freed.append("whisper")
     if freed and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -563,72 +562,69 @@ def _heartbeat(job_id: str, stop: threading.Event):
         JOBS[job_id]["heartbeat"] = f"{time.strftime('%H:%M:%S')} {line}"  # latest only, keeps log tail useful
 
 
-def _patch_fast_transcript():
-    """In-process faster-whisper transcription (same patch as tribe/fast_transcript_patch.py).
+_FW = {}  # faster-whisper models by name, loaded once per process
+_ORIG_TRANSCRIPT = None
+WHISPER_CODES = dict(english="en", french="fr", spanish="es", dutch="nl", chinese="zh")
 
-    tribev2's default path shells out to `uvx whisperx`, which is brittle on
-    Spaces. Patch once at startup; on marker mismatch log and keep default.
-    Never crashes startup.
-    """
+
+def _fast_transcript(wav_filename, language):
+    """In-process faster-whisper, replacing tribev2's `uvx whisperx` subprocess (which
+    installs whisperx and downloads an alignment model on every job). Any failure is
+    logged with the real error, then falls back to the original so the job finishes."""
+    import pandas as pd
+    import subprocess
+    job_id = CURRENT["job"]
+    name = os.environ.get("TRIBE_WHISPER_MODEL", "base")
     try:
-        import tribev2.eventstransforms as et
-        p = Path(et.__file__)
-        s = p.read_text()
-        if "_FW_MODEL" in s:
-            print("[space] fast-transcript patch already present", flush=True)
-            BOOT["transcript"] = "faster-whisper (already patched)"
-            return
-        marker = '        device = "cuda" if torch.cuda.is_available() else "cpu"\n        compute_type'
-        if marker not in s:
-            print("[space] WARN: eventstransforms marker not found, keeping whisperx path", flush=True)
-            BOOT["transcript"] = "WARN: marker missing, slow uvx whisperx path"
-            return
-        fast = """        try:
-            global _FW_MODEL
-            from faster_whisper import WhisperModel
-            if "_FW_MODEL" not in globals():
-                _FW_MODEL = WhisperModel(os.environ.get("TRIBE_WHISPER_MODEL", "base"),
-                                         device="cuda" if torch.cuda.is_available() else "cpu",
-                                         compute_type="int8_float16" if torch.cuda.is_available() else "int8")
-            import subprocess as _sp, numpy as _np
-            _raw = _sp.run(['ffmpeg','-loglevel','error','-i',str(wav_filename),'-f','f32le','-ac','1','-ar','16000','-'], capture_output=True, check=True).stdout
-            _audio = _np.frombuffer(_raw, dtype=_np.float32)
-            import time as _time
-            _t0 = _time.time()
-            segs, _ = _FW_MODEL.transcribe(_audio, language=language_codes[language], word_timestamps=True,
-                                           beam_size=1, vad_filter=True)
-            segs = list(segs)
-            try:
-                import sys as _sys
-                _sys.modules["app"].transcript_done(os.environ.get("TRIBE_WHISPER_MODEL", "base"),
-                                                    str(_FW_MODEL.model.device), len(_audio) / 16000,
-                                                    _time.time() - _t0)
-            except Exception:
-                pass
-            words = []
-            for i, seg in enumerate(segs):
-                for w in (seg.words or []):
-                    words.append({"text": w.word.replace('"', "").strip(), "start": w.start,
-                                  "duration": w.end - w.start, "sequence_id": i,
-                                  "sentence": seg.text.replace('"', "")})
-            return pd.DataFrame(words)
-        except ImportError:
-            pass
-"""
-        s = s.replace(marker, fast + marker, 1)
-        if "\nimport os" not in s:
-            s = "import os\n" + s
-        p.write_text(s)
-        print("[space] fast-transcript patch applied", flush=True)
-        BOOT["transcript"] = f"faster-whisper {os.environ.get('TRIBE_WHISPER_MODEL', 'base')}"
-    except Exception as e:  # noqa: BLE001 - transcription fallback must not kill boot
-        print(f"[space] WARN: transcript patch skipped ({e})", flush=True)
-        BOOT["transcript"] = f"WARN: patch failed ({e}), slow uvx whisperx path"
+        from faster_whisper import WhisperModel
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        if name not in _FW:
+            t0 = time.time()
+            _FW[name] = WhisperModel(name, device=dev, compute_type="float16" if dev == "cuda" else "int8")
+            if job_id:
+                jlog(job_id, f"  loaded faster-whisper {name} on {dev} in {time.time() - t0:.1f}s")
+        t0 = time.time()
+        raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(wav_filename), "-f", "f32le",
+                              "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout
+        audio = np.frombuffer(raw, dtype=np.float32)
+        segs, _ = _FW[name].transcribe(audio, language=WHISPER_CODES.get(language, "en"),
+                                       word_timestamps=True, beam_size=1, vad_filter=True)
+        words = []
+        for i, seg in enumerate(segs):  # generator: decoding happens while iterating
+            for w in (seg.words or []):
+                words.append({"text": w.word.replace('"', "").strip(), "start": w.start,
+                              "duration": w.end - w.start, "sequence_id": i,
+                              "sentence": seg.text.replace('"', "")})
+        transcript_done(name, dev, len(audio) / 16000, time.time() - t0, len(words))
+        return pd.DataFrame(words)
+    except Exception as e:  # noqa: BLE001 - fall back, but say exactly why
+        msg = f"{type(e).__name__}: {e}"
+        BOOT["transcript"] = f"fallback to uvx whisperx ({msg[:200]})"
+        if job_id:
+            jlog(job_id, f"  fast transcription FAILED ({msg[:300]}); falling back to slow uvx whisperx")
+            JOBS[job_id]["transcript"] = {"path": "uvx whisperx fallback", "error": msg[:500]}
+        return _ORIG_TRANSCRIPT(wav_filename, language)
+
+
+def _install_transcript_hook():
+    global _ORIG_TRANSCRIPT
+    import tribev2.eventstransforms as et
+    cls = et.ExtractWordsFromAudio
+    if _ORIG_TRANSCRIPT is None:
+        _ORIG_TRANSCRIPT = cls._get_transcript_from_audio
+    type.__setattr__(cls, "_get_transcript_from_audio", staticmethod(_fast_transcript))
+    BOOT["transcript"] = f"faster-whisper {os.environ.get('TRIBE_WHISPER_MODEL', 'base')} (in-process)"
+    print(f"[space] transcript hook: {BOOT['transcript']}", flush=True)
 
 
 @app.on_event("startup")
 def _startup():
-    _patch_fast_transcript()
+    try:  # import check only; the model loads on the first transcription
+        import faster_whisper, ctranslate2
+        BOOT["faster_whisper"] = (f"{faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, "
+                                  f"cuda devices {ctranslate2.get_cuda_device_count()}")
+    except Exception as e:  # noqa: BLE001 - surfaced on /health
+        BOOT["faster_whisper"] = f"IMPORT FAILED {type(e).__name__}: {e}"
     try:
         # Import torchvision fully on the main thread so worker-thread imports
         # never see a partially initialised module.
@@ -655,7 +651,7 @@ def load_model():
     overrides = {f"data.{m}.device": DEVICE for m in
                  ("text_feature", "audio_feature", "video_feature.image", "image_feature.image")}
     MODEL = TribeModel.from_pretrained("facebook/tribev2", device=DEVICE, config_update=overrides)
-    for hook in (_install_speed_hooks, _install_timing_hooks, _install_progress_loops):
+    for hook in (_install_transcript_hook, _install_speed_hooks, _install_timing_hooks, _install_progress_loops):
         try:
             hook()
         except Exception as e:  # noqa: BLE001 - progress must never break inference
