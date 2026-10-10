@@ -253,11 +253,11 @@ def _timed_audio_text_events(events, audio_only: bool = False):
     if not job.get("modalities", DEFAULT_MODALITIES).get("text", True):
         audio_only = True  # transcription off: no words, no Llama text features
         jlog(CURRENT["job"], "  transcription off: skipping transcribe/add_text/sentences/context")
-    transforms = [
-        ("extract_audio", du.ExtractAudioFromVideo()),
-        ("chunk_audio", du.ChunkEvents(event_type_to_chunk="Audio", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
-        ("chunk_video", du.ChunkEvents(event_type_to_chunk="Video", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
-    ]
+    # Transcribe BEFORE chunking. tribev2 chunks first, and ExtractWordsFromAudio then copies
+    # the whole-file transcript into every Audio chunk, shifted by the chunk start: with n
+    # chunks every word appears n times, n-1 of them at wrong times (upstream bug for clips
+    # over 60s; with our 10s chunks it hit every reel: 2086 "words" for a 72s reel).
+    transforms = [("extract_audio", du.ExtractAudioFromVideo())]
     if not audio_only:
         transforms += [
             ("transcribe", du.ExtractWordsFromAudio()),
@@ -266,6 +266,10 @@ def _timed_audio_text_events(events, audio_only: bool = False):
             ("word_context", du.AddContextToWords(sentence_only=False, max_context_len=1024, split_field="")),
             ("remove_missing", du.RemoveMissing()),
         ]
+    transforms += [
+        ("chunk_audio", du.ChunkEvents(event_type_to_chunk="Audio", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
+        ("chunk_video", du.ChunkEvents(event_type_to_chunk="Video", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
+    ]
     events = du.standardize_events(events)
     for name, t in transforms:
         with timed("events", name):

@@ -128,3 +128,13 @@
     finish 3.2, virality 35.1.
   - all three (job d604de1a): failed on the missing spaCy model after transcribe 61.7s
     and add_text 7.6s. Re-running after the fix.
+- Duplicate-word bug: tribev2 chunks Audio before transcription, and ExtractWordsFromAudio
+  then copies the whole-file transcript into each chunk, shifted by the chunk start (n-fold
+  words, n-1 of them mis-timed). FC013 had 2086 "words", 7x the real count. Fixed by
+  transcribing before chunking. All earlier text-on runs had the bug (sneaker: 219 words for
+  about 73 real ones). Real cancel tested on job c0990eb9: stopped 3s after the request.
+- FC013 all three modalities after the fix (job d249dee9, a100-large): 301s for 72.4s.
+  299 words (was 2086). Transcribe 64s, add_text 2s, text features 21s (was 424s+ and
+  cancelled), w2v 3s, video 186s (7 chunks at 24-32s), loaders+inference 4s, report 3s.
+  Model loads: Llama 6s, V-JEPA2 3s, w2v 2s. Scores: hook 38.0, hold 7.4, finish 2.8, virality 31.9.
+  Remaining cost: video 62%, transcription 21% (still parked).
