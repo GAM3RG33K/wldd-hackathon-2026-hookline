@@ -85,16 +85,13 @@ def rescore(job_dir, video=None, source_id=None):
 
 
 def _video_key(report):
-    """Identity of the reel: its local file, or for web uploads (copied to <job>/input.*) its name."""
+    """Identity of the reel = its file name (without extension), so a web-upload preview and a
+    full run of the same file match. Two different files with the same name would replace each other."""
     v = report.get("local_video")
     if not v:
         return None
-    if Path(v).stem == "input" and Path(v).parent.parent.resolve() == OUT.resolve():
-        return f"upload:{report.get('source_id') or Path(v).parent.name}"
-    try:
-        return str(Path(v).resolve())
-    except OSError:
-        return None
+    name = report.get("source_id") or Path(v).stem
+    return None if name in ("input", "") else name.lower()
 
 
 def _is_full(report):
