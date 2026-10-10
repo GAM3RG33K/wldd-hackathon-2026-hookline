@@ -287,8 +287,9 @@ def _transcript_html(r: dict) -> str:
 
 
 @app.get("/reports", response_class=HTMLResponse)
-def list_reports():
-    """All saved reports, newest first; refreshes itself so batch results appear as they land."""
+def list_reports(sort: str = "viral"):
+    """All saved reports, highest viral potential first (or ?sort=recent); refreshes itself so
+    batch results appear as they land."""
     import html
     rows = []
     for p in sorted(OUT.glob("*/report.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -302,13 +303,18 @@ def list_reports():
         full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
         audio = (r.get("audio") or {}).get("type") or "-"
         song = (r.get("audio") or {}).get("song")
-        rows.append(f'<tr><td><a href="/report/{job}/view">{html.escape(name if name != "input" else job)}</a></td>'
+        rows.append((s["virality"], p.stat().st_mtime, f'<tr><td><a href="/report/{job}/view">{html.escape(name if name != "input" else job)}</a></td>'
                     f'<td>{"full TRIBE" if full else "preview"}</td>'
                     f'<td><b>{s["virality"]:.0f}</b> {html.escape(s.get("virality_tag", s.get("virality_band", "")))}</td>'
                     f'<td>{s["hook_pct"]:.0f}</td><td>{s["hold_rate_pct"]:.0f}%</td><td>{s["finish_pct"]:.0f}%</td>'
                     f'<td>{html.escape(audio)}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
                     f'<td class=muted>{r.get("duration_s", "?")}s</td>'
-                    f'<td class=muted>{__import__("time").strftime("%H:%M", __import__("time").localtime(p.stat().st_mtime))}</td></tr>')
+                    f'<td class=muted>{__import__("time").strftime("%H:%M", __import__("time").localtime(p.stat().st_mtime))}</td></tr>'))
+    rows.sort(key=(lambda x: -x[1]) if sort == "recent" else (lambda x: (-x[0], -x[1])))
+    rows = [r[2] for r in rows]
+    by_viral = sort != "recent"
+    sort_links = (f'Sort: {"<b>viral potential</b>" if by_viral else "<a href=/reports>viral potential</a>"} · '
+                  f'{"<b>newest</b>" if not by_viral else "<a href=/reports?sort=recent>newest</a>"}')
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <meta http-equiv=refresh content=5><title>Hookline reports</title>
 <style>:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--accent:#2563eb}}
@@ -318,7 +324,7 @@ a{{color:var(--accent)}} .muted{{color:var(--muted)}} table{{width:100%;border-c
 th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
 .wrap{{overflow-x:auto}}</style>
 <h1>Hookline reports <span class=muted style=font-weight:400>({len(rows)}, refreshes every 5s)</span></h1>
-<p class=muted>Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a></p>
+<p class=muted>{sort_links} · Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a></p>
 <div class=wrap><table><tr><th>Reel</th><th>Run</th><th>Viral potential</th><th>Hook</th><th>Hold</th><th>Finish</th>
 <th>Audio</th><th>Length</th><th>Saved</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
 
