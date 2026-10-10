@@ -263,3 +263,17 @@
 - The test chain had hung silently twice: the first time it waited on a model warm-up that
   never finished, the second time on a quoting bug in its health check. Lesson: the chain
   must check that the job was actually submitted, not just wait.
+
+## Emotion + suggestions test (one reel per category, a100)
+- Emotion overhead: 0.7-3.4s per reel (mostly frame extraction; each model <= 0.4s).
+- FC032 (song): channels visual + sounds; audio typed "instrumental" (AST vocals barely fire
+  on this mix). Vocals threshold to tune at the next Space deploy.
+- FL011: tempering CLIP (p^0.5) flipped the dominant emotion from awe 77% to amusement 88%;
+  the visual channel is near-tied, so the report should show the full mix, not just the winner.
+- Brain salience cross-check r = -0.64 / -0.39 / -0.02: it gives no support for the arousal
+  track yet. Shown honestly, not used.
+- "End earlier" cut 72% of an 18s reel; now capped at 25% of the reel.
+- Verification: re-encoding alone shifts mean engagement by -5.6% (OL003 null edit vs
+  original). Variants are now compared with a null edit (re-encode only, one per reel). OL003's
+  zoom at 0:04-0:08: edited stretch +5.1%, rest +0.8%, so "improved" (it was "worse"/"no clear
+  change" when compared with the original).
