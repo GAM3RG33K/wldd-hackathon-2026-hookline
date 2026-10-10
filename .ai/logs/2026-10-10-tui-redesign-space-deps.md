@@ -277,3 +277,17 @@
   original). Variants are now compared with a null edit (re-encode only, one per reel). OL003's
   zoom at 0:04-0:08: edited stretch +5.1%, rest +0.8%, so "improved" (it was "worse"/"no clear
   change" when compared with the original).
+
+## Taxonomy test (FL041, FC032, FL011, OL003; new per-prompt cues)
+- FL041 compared with a reference evaluation of the reel (elephant rescue; mournful woodwind score):
+  music "slow mournful melody" 80%, sadness 79%, sorrow peaks for 36s (strength 100), viral
+  36 -> 68. Still missing: empathic pain (max 0.3), the hope/relief ending, and the resolving arc.
+- A general bias: amusement dominates FC032 (94%), FL011 (100%) and OL003 (79%). The "funny prank
+  or blooper" prompt has the highest raw similarity on every reel (hub prompt), and GoEmotions
+  amusement fires on Hinglish. Deviation from each prompt's own mean recovers FL041's story
+  (crying 0-10s, injured animal 10-20s / 60-70s, act of kindness 80-90s).
+- Per-prompt calibration (tribe/calibrate_prompts.py -> prompt_calibration.json; z vs corpus,
+  reels weighted equally) backfired with 4 reels: FL041 is 86 of the 165 seconds, so its sadness
+  became the norm. Calibration is now off below 15 reels; it needs a balanced reference run.
+- One report per video: a newer run replaces older ones (full beats preview); keyed by file name;
+  replaced folders go to backend/out/.replaced/. 22 duplicates cleaned up.

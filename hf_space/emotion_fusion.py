@@ -18,7 +18,33 @@ EMOTIONS = TX.NAMES
 AROUSAL = {e: TX.EMOTIONS[e][0] for e in EMOTIONS}
 VALENCE = {e: TX.EMOTIONS[e][1] for e in EMOTIONS}
 CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9}
-ZS_SCALE = {"visual": 40.0, "music": 40.0}  # softmax sharpness over prompts (raw similarities arrive)
+ZS_SCALE = {"visual": 40.0, "music": 40.0}  # softmax sharpness over raw similarities (no calibration yet)
+Z_SCALE = {"visual": 1.5, "music": 1.5}      # softmax sharpness over calibrated z-scores
+MIN_CAL_REELS = 15  # below this the reference set is too thin: one long reel would define "usual"
+
+
+def _calibration():
+    import json
+    from pathlib import Path
+    p = Path(__file__).with_name("prompt_calibration.json")
+    try:
+        cal = json.loads(p.read_text())
+        return cal if cal.get("reels", 0) >= MIN_CAL_REELS else None
+    except (OSError, ValueError):
+        return None
+
+
+CAL = _calibration()
+
+
+def _calibrated(S, prompts, channel):
+    """Raw similarities -> per-prompt z-scores ('higher than usual for this prompt') when calibrated."""
+    c = (CAL or {}).get(channel) or {}
+    if not c or not all(p in c for p in prompts):
+        return S * ZS_SCALE[channel]
+    mu = np.array([c[p][0] for p in prompts])
+    sd = np.array([c[p][1] for p in prompts])
+    return (S - mu) / sd * Z_SCALE[channel]
 VISUAL_TEMPER = 0.5                          # for legacy probability cues only
 VISUAL_STRONG_WEIGHT = 0.5                   # visual alone (scene) can't make a strong peak
 STRONG_LEVEL, STRONG_PROMINENCE, STRONG_DROP, STRONG_FULL = 0.6, 0.15, 0.15, 0.30
@@ -34,7 +60,7 @@ def _seconds(x, n, default=None):
     return (x + [default] * n)[:n]
 
 
-def _softmax(S, scale):
+def _softmax(S, scale=1.0):
     S = S * scale
     S = S - S.max(1, keepdims=True)
     P = np.exp(S)
@@ -49,7 +75,7 @@ def visual_dist(cue, n):
     if "prompt_sim" in cue:
         prompts = [p for p in TX.VISUAL_PROMPTS if p in cue["prompt_sim"]]
         S = np.array([_seconds(cue["prompt_sim"][p], n, 0.0) for p in prompts], dtype=float).T
-        P = _softmax(S, ZS_SCALE["visual"])
+        P = _softmax(_calibrated(S, prompts, "visual"))
         for j, p in enumerate(prompts):
             D[:, EMOTIONS.index(TX.VISUAL_PROMPTS[p])] += P[:, j]
         return D
@@ -71,7 +97,7 @@ def music_dist(cue, n):
         prompts = [p for p in TX.MUSIC_PROMPTS if p in cue["prompt_sim"]]
         table = TX.MUSIC_PROMPTS
         S = np.array([_seconds(cue["prompt_sim"][p], n, 0.0) for p in prompts], dtype=float).T
-        P = _softmax(S, ZS_SCALE["music"])
+        P = _softmax(_calibrated(S, prompts, "music"))
     else:
         src = cue.get("sim", cue)
         prompts = list(src)
@@ -92,6 +118,9 @@ def text_dist(text, n):
         if not d:
             continue
         seen[t] = True
+        tc = (CAL or {}).get("text") or {}
+        if tc:  # calibrated: only labels firing above their usual level count (removes label bias)
+            d = {k: max(0.0, (v - tc[k][0]) / tc[k][1]) / 3.0 if k in tc else v for k, v in d.items()}
         for go, p in d.items():
             for e, w in TX.GO_MAP.get(go, {}).items():
                 D[t, EMOTIONS.index(e)] += w * p
