@@ -279,7 +279,8 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   f        full TRIBE brain model on the GPU Space (minutes)
   o        analyse your own video file
   r        jump to a random sample reel
-  w        open the selected report in the browser (chart + PNG)
+  w        open the selected report in the browser (video + chart + transcript)
+  R        open all reports in the browser (live list, refreshes every 5s)
   v a t    toggle video / audio / transcript for full TRIBE runs
   l        transcription language: auto (Hindi/English/Hinglish) / hi / en
            transcript cycles auto / on / off. auto: a speech gate checks how much of the
@@ -335,6 +336,7 @@ class Hookline(App):
         Binding("o", "own_file", "Your video"),
         Binding("r", "random", "Random reel"),
         Binding("w", "web", "Web view"),
+        Binding("R", "all_reports", "All reports"),
         Binding("x", "stop", "Stop job"),
         Binding("v", "toggle('video')", "Video", show=False),
         Binding("a", "toggle('audio')", "Audio", show=False),
@@ -995,6 +997,10 @@ class Hookline(App):
             return
         webbrowser.open(f"{BACKEND}/report/{job}/view")
         self.say(f"Opened {BACKEND}/report/{job}/view")
+
+    def action_all_reports(self):
+        webbrowser.open(f"{BACKEND}/reports")
+        self.say(f"Opened {BACKEND}/reports (all reports, refreshes every 5s)")
 
     def action_help(self):
         self.push_screen(HelpScreen())
