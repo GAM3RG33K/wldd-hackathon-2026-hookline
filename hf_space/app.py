@@ -879,17 +879,8 @@ def list_jobs():
     return sorted(rows, key=lambda r: r["age_s"])
 
 
-@app.get("/report/{job_id}")
-def get_report(job_id: str):
-    st = JOBS.get(job_id)
-    p = WORK / job_id / "report.json"
-    if p.exists():
-        return json.loads(p.read_text())
-    if st is None:
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    return {"job_id": job_id, **progress(job_id)}
-
-
+# Asset routes first: FastAPI matches in order, and /report/{job_id} would otherwise
+# capture '<id>.png' as a job id and answer 'unknown job'.
 @app.get("/report/{job_id}.md")
 def get_md(job_id: str):
     p = WORK / job_id / "report.md"
@@ -902,6 +893,17 @@ def get_png(job_id: str):
     p = WORK / job_id / "report.png"
     return FileResponse(p, media_type="image/png") if p.exists() \
         else JSONResponse({"error": "not ready"}, status_code=404)
+
+
+@app.get("/report/{job_id}")
+def get_report(job_id: str):
+    st = JOBS.get(job_id)
+    p = WORK / job_id / "report.json"
+    if p.exists():
+        return json.loads(p.read_text())
+    if st is None:
+        return JSONResponse({"error": "unknown job"}, status_code=404)
+    return {"job_id": job_id, **progress(job_id)}
 
 
 @app.get("/")

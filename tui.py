@@ -138,9 +138,14 @@ def fmt_views(v):
 # -------------------------------------------------------------------- widgets
 
 class AttentionStrip(Widget):
-    """Two-row per-second attention bars + a marker row (h=hook window, !=drop, *=peak)."""
+    """Per-second attention chart: 30% of the screen tall, full pane width.
 
-    DEFAULT_CSS = "AttentionStrip { height: 5; }"
+    Bars = attention (0-100, avg second ~ 50), dots = estimated viewers remaining %,
+    marker row: h hook window, ! drop zone, * peak, | scene cut. Text markers mean it
+    still reads without colour."""
+
+    DEFAULT_CSS = "AttentionStrip { height: 30vh; min-height: 10; width: 1fr; }"
+    GUTTER = 5  # "100 ┤"
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -152,35 +157,67 @@ class AttentionStrip(Widget):
 
     def render(self):
         r = self.report
-        if not r or not r.get("series", {}).get("attention"):
-            return Text("")
-        att = r["series"]["attention"]
-        w = max(10, self.size.width - 1)
-        n = len(att)
-        cols = [att[min(n - 1, int(i * n / w))] for i in range(w)]
-        sec = [int(i * n / w) for i in range(w)]
-        lo, hi = min(att), max(att)
-        lvl = [round((v - lo) / ((hi - lo) or 1) * 16) for v in cols]
-        m = r["moments"]
+        series = (r or {}).get("series", {})
+        att = series.get("attention") or []
+        if not att:
+            return Text("no per-second series in this report", "dim")
+        surv = series.get("survival_pct") or []
+        cuts = {int(c) for c in series.get("cuts_s") or []}
+        m = r.get("moments", {})
         drops = {t for a, b in m.get("drop_zones_s", []) for t in range(a, b + 1)}
         peak = m.get("peak_attention_at_s", -1)
+        n = len(att)
+        w = max(10, self.size.width - self.GUTTER)
+        rows = max(3, self.size.height - 3)  # minus marker, axis and legend rows
+        sec = [min(n - 1, int(i * n / w)) for i in range(w)]
+        level = [max(0.0, min(100.0, att[s])) / 100 * rows * 8 for s in sec]
+        surv_row = [rows - 1 - min(rows - 1, int(max(0.0, min(100.0, surv[s])) / 100 * rows)) if surv else -1
+                    for s in sec]
+        mid = rows - 1 - int(rows / 2)
         out = Text()
-        for row in (1, 0):  # top row holds levels 9-16, bottom 1-8
-            for i, l in enumerate(lvl):
-                ch = BLOCKS[max(0, min(8, l - 8 * row))]
-                out.append(ch, "red" if sec[i] in drops else "green" if sec[i] < 3 else "cyan")
+        for row in range(rows):
+            label = "100" if row == 0 else " 50" if row == mid else "  0" if row == rows - 1 else "   "
+            out.append(f"{label} ┤" if label.strip() else "    │", "dim")
+            base = (rows - 1 - row) * 8
+            for i, s in enumerate(sec):
+                fill = int(max(0, min(8, level[i] - base)))
+                bar = "red" if s in drops else "green" if s < 3 else "magenta" if s == peak else "cyan"
+                if surv_row[i] == row and fill in (0, 8):  # survival dot, drawn over full bar cells too
+                    out.append("•", f"bold yellow on {bar}" if fill else "bold yellow")
+                elif fill:
+                    out.append(BLOCKS[fill], bar)
+                elif surv_row[i] == row:
+                    out.append("•", "yellow")
+                elif row == mid:
+                    out.append("┈", "dim")
+                else:
+                    out.append(" ")
             out.append("\n")
-        marks = Text()
-        last = None
-        for i, s in enumerate(sec):
-            ch = "*" if s == peak and last != s else "!" if s in drops else "h" if s < 3 else "·"
-            marks.append(ch, "bold" if ch != "·" else "dim")
-            last = s
-        out.append(marks)
+        out.append(" " * (self.GUTTER - 1) + "└", "dim")
+        prev = None
+        for s in sec:
+            first = s != prev
+            ch = "*" if s == peak and first else "|" if s in cuts and first else "!" if s in drops else \
+                "h" if s < 3 else "─"
+            out.append(ch, "bold magenta" if ch == "*" else "bold red" if ch == "!" else "bold green" if ch == "h"
+                       else "dim" if ch == "─" else "")
+            prev = s
         out.append("\n")
-        dur = r.get("duration_s") or n
-        axis = f"0:00{' ' * max(1, w - 8)}{fmt_t(dur)}"
-        out.append(axis, "dim")
+        axis = [" "] * w
+        step = max(1, round(n / max(1, w // 9) / 5) * 5) if n > 20 else 2
+        for t in range(0, n + 1, step):
+            lbl = fmt_t(t)
+            x = min(w - len(lbl), int(t / n * w))
+            if all(c == " " for c in axis[max(0, x - 1):x + len(lbl) + 1]):
+                axis[x:x + len(lbl)] = list(lbl)
+        out.append(" " * self.GUTTER + "".join(axis) + "\n", "dim")
+        out.append(" " * self.GUTTER)
+        for glyph, style, name in (("█", "cyan", "attention (avg ≈ 50)  "), ("•", "yellow", "viewers remaining %  "),
+                                   ("h", "bold green", "hook 0-3s  "), ("!", "bold red", "drop  "),
+                                   ("*", "bold magenta", f"peak {fmt_t(peak) if peak >= 0 else '?'}  "),
+                                   ("|", "", "cut")):
+            out.append(glyph, style)
+            out.append(f" {name}", "dim")
         return out
 
 
@@ -299,7 +336,7 @@ class Hookline(App):
                 with Horizontal(id="tiles"):
                     for k in ("hook", "hold", "finish", "virality"):
                         yield Static(classes="tile", id=f"t-{k}")
-                yield Static("Attention per second", classes="section", id="strip-h")
+                yield Static("Attention per second · viewers remaining", classes="section", id="strip-h")
                 yield AttentionStrip(id="strip")
                 yield Static(id="moments")
                 yield Static("What to change", classes="section", id="recs-h")
@@ -570,7 +607,7 @@ class Hookline(App):
                 self.by_path[d["path"]] = job
                 self.space_run = None
                 el = time.time() - run["t0"]
-                self.call_from_thread(self.show_report, r, job, f"{d['id']} · full TRIBE")
+                self.call_from_thread(self.show_report, r, job, d["id"])
                 self.call_from_thread(self.refresh_saved)
                 self.call_from_thread(self.say, f"Full TRIBE report ready in {fmt_dur(el)} · saved as {job}", "green")
                 return

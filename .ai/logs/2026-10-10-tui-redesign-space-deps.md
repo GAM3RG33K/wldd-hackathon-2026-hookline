@@ -147,3 +147,16 @@
   `/health.boot.faster_whisper` shows the import and ctranslate2 CUDA status. Startup no longer
   edits site-packages. Deployed after FC021 (job 2e827081, 147s for 40.1s) finished.
 - TUI polls the Space every 1s (was 5s).
+
+## Report chart + missing PNG/MD
+- Space jobs never returned a PNG or markdown: `/report/{job_id}` was declared before
+  `/report/{job_id}.png`, so `<id>.png` matched as a job id ("unknown job"). Asset routes now
+  come first. Some scripts had saved that 404 JSON as report.png/md; those files were removed,
+  along with the s-* folders of failed jobs (error JSON instead of a report).
+- Web view (`/report/{id}/view`): the chart is drawn as SVG from report.json (attention,
+  viewers remaining, hook window, strongest window, drop zones, scene cuts, peak), full width
+  and 30vh tall, so every saved report has a chart even without a PNG. Also: score tiles,
+  correct preview vs full-TRIBE label, modalities, markdown generated locally when missing,
+  PNG shown under "Full chart" only when it is a real PNG, and dark mode.
+- TUI: AttentionStrip is 30vh tall and full pane width, with a 0/50/100 y-axis, bars coloured
+  by zone, survival dots drawn over the bars, a marker row (h/!/*/|), time ticks and a legend.

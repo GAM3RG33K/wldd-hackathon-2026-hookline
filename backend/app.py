@@ -179,22 +179,131 @@ def get_report(job_id: str):
     return json.loads(p.read_text())
 
 
+def _is_png(p: Path) -> bool:
+    return p.exists() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def _fmt_t(sec) -> str:
+    sec = int(round(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def _chart_svg(r: dict) -> str:
+    """Per-second attention + survival as a full-width SVG, drawn from report.json."""
+    import html
+    att = r.get("series", {}).get("attention") or []
+    surv = r.get("series", {}).get("survival_pct") or []
+    cuts = r.get("series", {}).get("cuts_s") or []
+    if not att:
+        return "<p class=muted>No per-second series in this report.</p>"
+    T = len(att)
+    m = r.get("moments", {})
+    # x in seconds (0..T), y in percent (0 top = 100%); stretched to the box, strokes stay crisp
+    pts = lambda ys: " ".join(f"{i + 0.5:.2f},{100 - max(0, min(100, y)):.2f}" for i, y in enumerate(ys))
+    parts = [f'<rect x="0" y="0" width="{min(3, T)}" height="100" class="hook"/>']
+    for a, b in m.get("drop_zones_s", []):
+        parts.append(f'<rect x="{a}" y="0" width="{max(0.5, b - a)}" height="100" class="drop"/>')
+    sw = m.get("strongest_window_s")
+    if sw:
+        parts.append(f'<rect x="{sw[0]}" y="0" width="{sw[1] - sw[0]}" height="100" class="strong"/>')
+    for g in (25, 50, 75):
+        parts.append(f'<line x1="0" x2="{T}" y1="{g}" y2="{g}" class="grid"/>')
+    for c in cuts:
+        parts.append(f'<line x1="{c}" x2="{c}" y1="0" y2="100" class="cut"/>')
+    if surv:
+        parts.append(f'<polyline points="{pts(surv)}" class="surv"/>')
+    parts.append(f'<polyline points="{pts(att)}" class="att"/>')
+    pk = m.get("peak_attention_at_s")
+    if pk is not None:
+        parts.append(f'<line x1="{pk + 0.5}" x2="{pk + 0.5}" y1="0" y2="100" class="peak"/>')
+    step = max(1, round(T / 10 / 5) * 5) if T > 20 else (2 if T > 8 else 1)
+    ticks = "".join(f'<span style="left:{100 * t / T:.2f}%">{_fmt_t(t)}</span>' for t in range(0, T + 1, step))
+    peak_lbl = f'<span class="pk" style="left:{100 * (pk + 0.5) / T:.2f}%">peak {_fmt_t(pk)}</span>' if pk is not None else ""
+    title = html.escape(f"Attention per second, {T}s")
+    return f"""<figure class="chart" aria-label="{title}">
+  <div class="plot">
+    <div class="yax"><span style="top:0">100</span><span style="top:50%">50</span><span style="top:100%">0</span></div>
+    <svg viewBox="0 0 {T} 100" preserveAspectRatio="none" role="img"><title>{title}</title>{''.join(parts)}</svg>
+    <div class="peaklbl">{peak_lbl}</div>
+  </div>
+  <div class="xax">{ticks}</div>
+  <figcaption>
+    <span><i class="sw att"></i>attention (avg second &asymp; 50)</span>
+    <span><i class="sw surv"></i>est. viewers remaining %</span>
+    <span><i class="sw hook"></i>hook window 0-3s</span>
+    <span><i class="sw drop"></i>drop zone</span>
+    <span><i class="sw strong"></i>strongest window</span>
+    <span><i class="sw cut"></i>scene cut</span>
+  </figcaption>
+</figure>"""
+
+
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
 def view_report(job_id: str):
+    import html
     p = OUT / job_id / "report.json"
     if not p.exists():
         return HTMLResponse("unknown job", status_code=404)
     r = json.loads(p.read_text())
-    recs = "".join(f"<li><b>{x['at']}</b> {x['issue']}. {x['fix']}</li>" for x in r["recommendations"])
-    return f"""<!doctype html><meta charset=utf-8><title>Hookline report {job_id}</title>
-<style>body{{font-family:system-ui;max-width:760px;margin:2rem auto;padding:0 1rem}}</style>
-<h1>Hookline report <span style=color:#666>{job_id} (preview)</span></h1>
-<p>Hook <b>{r['scores']['hook_pct']}%</b> ({r['scores']['hook_band']}) · Hold
-<b>{r['scores']['hold_rate_pct']}%</b> · Finish <b>{r['scores']['finish_pct']}%</b> ·
-Virality <b>{r['scores']['virality']}</b> ({r['scores']['virality_band']})</p>
-<img src="/report/{job_id}.png" style="max-width:100%;border:1px solid #ddd;border-radius:12px">
+    s = r["scores"]
+    full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
+    mode = "full TRIBE" if full else "preview"
+    md = OUT / job_id / "report.md"
+    if not md.exists() or md.read_text(errors="ignore").startswith('{"error"'):
+        HL.write_md(r, md)  # Space jobs may come back without markdown; it only needs report.json
+    png = OUT / job_id / "report.png"
+    png_html = (f'<details><summary>Full chart (PNG)</summary><img src="/report/{job_id}.png" alt="chart"></details>'
+                if _is_png(png) else "")
+    mods = r.get("modalities")
+    mods_txt = (" · modalities: " + ", ".join(k for k, v in mods.items() if v)) if mods else ""
+    recs = "".join(f"<li><b>{html.escape(x['at'])}</b> {html.escape(x['issue'])}. {html.escape(x['fix'])}</li>"
+                   for x in r["recommendations"])
+    tile = lambda name, val, sub="": (f'<div class="tile"><div class="k">{name}</div><div class="v">{val}</div>'
+                                      f'<div class="s">{sub}</div></div>')
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Hookline report {job_id}</title>
+<style>
+:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#ea8a0c;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#f5a524}}}}
+body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
+a{{color:var(--att)}}
+h1 span{{color:var(--muted);font-weight:500}} .muted{{color:var(--muted)}}
+.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:1rem 0}}
+.tile{{border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}}
+.tile .k{{color:var(--muted);font-size:.85rem}} .tile .v{{font-size:2rem;font-weight:700}} .tile .s{{color:var(--muted)}}
+.chart{{margin:1.5rem 0;width:100%}}
+.plot{{position:relative;height:30vh;min-height:180px;margin-left:36px;border-left:1px solid var(--line);border-bottom:1px solid var(--line)}}
+.plot svg{{position:absolute;inset:0;width:100%;height:100%;overflow:visible}}
+.yax span{{position:absolute;left:-34px;transform:translateY(-50%);font-size:.75rem;color:var(--muted)}}
+.xax{{position:relative;height:1.4rem;margin-left:36px;font-size:.75rem;color:var(--muted)}}
+.xax span{{position:absolute;transform:translateX(-50%);top:4px}}
+.peaklbl .pk{{position:absolute;top:-1.2rem;transform:translateX(-50%);font-size:.75rem;color:var(--strong)}}
+svg .att{{fill:none;stroke:var(--att);stroke-width:2.5;vector-effect:non-scaling-stroke}}
+svg .surv{{fill:none;stroke:var(--surv);stroke-width:2;stroke-dasharray:6 4;vector-effect:non-scaling-stroke}}
+svg .hook{{fill:var(--hook);opacity:.12}} svg .drop{{fill:var(--drop);opacity:.12}} svg .strong{{fill:var(--strong);opacity:.10}}
+svg .grid{{stroke:var(--line);vector-effect:non-scaling-stroke}}
+svg .cut{{stroke:var(--muted);stroke-dasharray:2 3;vector-effect:non-scaling-stroke;opacity:.6}}
+svg .peak{{stroke:var(--strong);stroke-width:1.5;vector-effect:non-scaling-stroke}}
+figcaption{{display:flex;flex-wrap:wrap;gap:14px;font-size:.8rem;color:var(--muted);margin-top:.4rem}}
+.sw{{display:inline-block;width:14px;height:10px;margin-right:5px;border-radius:2px;vertical-align:middle}}
+.sw.att{{background:var(--att)}} .sw.surv{{background:var(--surv)}} .sw.hook{{background:var(--hook);opacity:.4}}
+.sw.drop{{background:var(--drop);opacity:.4}} .sw.strong{{background:var(--strong);opacity:.35}}
+.sw.cut{{border-left:2px dashed var(--muted);border-radius:0;width:0}}
+details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;margin-top:.5rem}}
+@media (max-width:640px){{.tiles{{grid-template-columns:repeat(2,1fr)}}}}
+</style>
+<h1>Hookline report <span>{job_id} ({mode})</span></h1>
+<p class=muted>{html.escape(Path(r.get('video', '')).name)} · {r.get('duration_s', '?')}s{mods_txt}</p>
+<div class="tiles">
+{tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
+{tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}
+{tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
+{tile('Virality', f"{s['virality']:.0f}", s['virality_band'])}
+</div>
+{_chart_svg(r)}
 <h2>What to change</h2><ul>{recs}</ul>
-<p><i>{r['method']}</i> · neural_source={r.get('neural_source', '?')}</p>
+{png_html}
+<p><i>{html.escape(r['method'])}</i> · neural_source={html.escape(str(r.get('neural_source', '?')))}</p>
 <p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a></p>"""
 
 
