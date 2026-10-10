@@ -236,7 +236,8 @@ def _chart_svg(r: dict) -> str:
                 continue
             size = 6 + 10 * float(a_)
             y = 100 - max(0, min(100, att[i]))
-            dots += (f'<i class=edot title="{_fmt_t(i)} {d} (arousal {a_:.2f})" style="left:{100 * (i + 0.5) / T:.2f}%;'
+            dots += (f'<i class=edot data-s="{i}" data-label="{_fmt_t(i)} · {d} · arousal {a_:.2f}" '
+                     f'title="{_fmt_t(i)} {d} (arousal {a_:.2f})" style="left:{100 * (i + 0.5) / T:.2f}%;'
                      f'top:{y:.2f}%;width:{size:.0f}px;height:{size:.0f}px;background:{EMO_COLORS.get(d, "#888")}"></i>')
     title = html.escape(f"Attention per second, {T}s")
     return f"""<figure class="chart" aria-label="{title}">
@@ -245,6 +246,7 @@ def _chart_svg(r: dict) -> str:
     <svg viewBox="0 0 {T} 100" preserveAspectRatio="none" role="img"><title>{title}</title>{''.join(parts)}</svg>
     <div class="peaklbl">{peak_lbl}</div>
     <div class="edots">{dots}</div>
+    <div class="etip" id="etip" hidden></div>
     <div class="playhead" id="playhead" hidden></div>
   </div>
   <div class="xax">{ticks}</div>
@@ -574,6 +576,9 @@ details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;marg
 .playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
 .edots .edot{{position:absolute;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid var(--bg);
   box-shadow:0 0 0 1px rgba(0,0,0,.25);cursor:default}}
+.edots .edot.on{{transform:translate(-50%,-50%) scale(1.6);z-index:2}}
+.etip{{position:absolute;transform:translate(-50%,calc(-100% - 14px));padding:3px 8px;border-radius:6px;font-size:.75rem;
+  white-space:nowrap;background:var(--fg);color:var(--bg);pointer-events:none;z-index:3}}
 .emo .band{{display:flex;height:18px;margin:.6rem 0 0 36px;border-radius:4px;overflow:hidden}}
 .emo .band i{{display:block}} .emo p{{margin:.4rem 0 0 36px;font-size:.9rem}} .emo figcaption{{margin-left:36px}}
 ol.sugs li{{margin:.6rem 0}} .badge{{display:inline-block;font-size:.75rem;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin-left:4px}}
@@ -607,9 +612,23 @@ Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored 
 (() => {{
   const v = document.getElementById("reel"), ph = document.getElementById("playhead");
   const T = {len((r.get("series") or {}).get("attention") or []) or 1};
-  if (v && ph) v.addEventListener("timeupdate", () => {{
+  const tip = document.getElementById("etip");
+  const dots = {{}};
+  document.querySelectorAll(".edot").forEach(d => dots[d.dataset.s] = d);
+  let lit = null;
+  const sync = () => {{
     ph.hidden = false; ph.style.left = Math.min(100, 100 * v.currentTime / T) + "%";
-  }});
+    // emotion label when the playhead reaches a dot
+    const d = dots[Math.floor(v.currentTime)];
+    if (lit && lit !== d) lit.classList.remove("on");
+    if (d && tip) {{
+      d.classList.add("on"); lit = d;
+      tip.textContent = d.dataset.label; tip.style.left = d.style.left; tip.style.top = d.style.top;
+      tip.style.background = d.style.background; tip.hidden = false;
+    }} else if (tip) {{ tip.hidden = true; lit = null; }}
+  }};
+  // playback and scrubbing (a paused seek fires 'seeked', not 'timeupdate')
+  if (v && ph) ["timeupdate", "seeked"].forEach(ev => v.addEventListener(ev, sync));
   document.querySelectorAll("a.ts").forEach(a => a.addEventListener("click", e => {{
     e.preventDefault(); if (v) {{ v.currentTime = +a.dataset.t; v.play(); }}
   }}));
