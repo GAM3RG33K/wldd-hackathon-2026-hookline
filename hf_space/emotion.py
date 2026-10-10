@@ -20,6 +20,18 @@ import torch
 CLIP_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
 VOICE_REPO = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"  # CC-BY-NC-SA: prototype only
 TEXT_REPO = "SamLowe/roberta-base-go_emotions"
+MUSIC_REPO = "laion/clap-htsat-fused"  # Apache-2.0, safetensors (the music-only CLAPs are .bin)
+# Music mood prompts (two per mood); per-second softmax over moods from 4s windows.
+MUSIC_PROMPTS = {
+    "sad": ["sad emotional piano music", "melancholic slow strings"],
+    "uplifting": ["uplifting inspiring hopeful music", "emotional swelling music building to a climax"],
+    "epic": ["epic powerful cinematic music", "dramatic orchestral music"],
+    "tense": ["tense suspenseful music", "dark ominous music"],
+    "happy": ["happy upbeat cheerful music", "energetic pop dance music"],
+    "funny": ["comedic quirky funny music", "silly cartoon sound effects"],
+    "calm": ["calm relaxing ambient music", "soft peaceful background music"],
+    "none": ["people talking with no music", "silence"],
+}
 
 EMOTIONS = ["amusement", "awe", "surprise", "curiosity", "tension", "outrage", "warmth", "sadness"]
 # Two CLIP prompts per emotion plus a neutral anchor; scores are averaged per emotion.
@@ -113,6 +125,35 @@ def _voice(audio, sr, speech_prob, device):
     return {"arousal": arousal, "valence": valence}
 
 
+def _music(audio16k, n, device):
+    """CLAP zero-shot music mood per second (4s window centred on each second)."""
+    from transformers import ClapModel, ClapProcessor
+    import torchaudio.functional as AF
+    if "music" not in _M:
+        _M["music"] = (ClapModel.from_pretrained(MUSIC_REPO, torch_dtype=torch.float32, use_safetensors=True)
+                       .eval().to(device), ClapProcessor.from_pretrained(MUSIC_REPO))
+    model, proc = _M["music"]
+    moods = list(MUSIC_PROMPTS)
+    texts = [t for m in moods for t in MUSIC_PROMPTS[m]]
+    y = AF.resample(torch.from_numpy(np.asarray(audio16k, dtype=np.float32)), 16000, 48000).numpy()
+    sr = 48000
+    with torch.inference_mode():
+        tin = proc(text=texts, return_tensors="pt", padding=True).to(device)
+        tf = model.get_text_features(**tin)
+        tf = tf / tf.norm(dim=-1, keepdim=True)
+        clips = [y[max(0, int((t - 1.5) * sr)):int((t + 2.5) * sr)] for t in range(n)]
+        clips = [c if len(c) >= sr else np.pad(c, (0, sr - len(c))) for c in clips]
+        out = []
+        for i in range(0, n, 16):
+            ain = proc(audios=clips[i:i + 16], sampling_rate=sr, return_tensors="pt").to(device)
+            af = model.get_audio_features(**ain)
+            af = af / af.norm(dim=-1, keepdim=True)
+            sim = (100.0 * af @ tf.T).reshape(len(clips[i:i + 16]), len(moods), 2).mean(-1)
+            out.append(torch.softmax(sim, dim=-1).cpu().numpy())
+    p = np.concatenate(out) if out else np.zeros((0, len(moods)))
+    return {m: [round(float(x), 3) for x in p[:, j]] for j, m in enumerate(moods)}
+
+
 def _text(segments, n, device):
     from transformers import pipeline
     if "text" not in _M:
@@ -138,7 +179,8 @@ def warm(device):
     status = {}
     for name, fn in (("visual", lambda: _clip([Image.new("RGB", (64, 64))], device)),
                      ("voice", lambda: _voice(np.zeros(32000, dtype=np.float32), 16000, [1.0], device)),
-                     ("text", lambda: _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device))):
+                     ("text", lambda: _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device)),
+                     ("music", lambda: _music(np.zeros(32000, dtype=np.float32), 2, device))):
         try:
             fn()
             status[name] = "ok"
@@ -162,7 +204,8 @@ def emotion_cues(video, audio, sr, speech_prob, segments, device, log=print):
             except Exception as e:  # noqa: BLE001
                 log(f"emotion/{name} skipped: {type(e).__name__}: {e}")
     for name, fn in (("voice", lambda: _voice(audio, sr, speech_prob, device)),
-                     ("text", lambda: _text(segments, n, device))):
+                     ("text", lambda: _text(segments, n, device)),
+                     ("music", lambda: _music(audio, n, device))):
         t0 = time.time()
         try:
             out[name] = fn()

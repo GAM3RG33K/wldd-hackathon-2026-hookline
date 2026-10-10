@@ -60,7 +60,7 @@ RUN mkdir -p /tmp/home /tmp/hf /tmp/cache /tmp/torch && chmod -R a+rwX /tmp \
 # Chromaprint fpcalc (a few MB) for song identification against the trending catalog.
 RUN apt-get update -qq && apt-get install -y -qq libchromaprint-tools > /dev/null && rm -rf /var/lib/apt/lists/*
 
-COPY tribe_analyze.py hookline_report.py emotion_fusion.py suggest.py app.py audio_match.py emotion.py trending_audio.json ./
+COPY tribe_analyze.py hookline_report.py emotion_fusion.py suggest.py audio_music.py app.py audio_match.py emotion.py trending_audio.json ./
 
 EXPOSE 7860
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]

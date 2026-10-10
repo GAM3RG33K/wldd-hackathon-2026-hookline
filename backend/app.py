@@ -369,7 +369,7 @@ def report_video(job_id: str):
     return FileResponse(v, media_type="video/mp4")
 
 
-EMO_COLORS = {"amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
+EMO_COLORS = {"moved": "#fb7185", "amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
               "tension": "#ef4444", "outrage": "#b91c1c", "warmth": "#22c55e", "sadness": "#3b82f6", "neutral": "#555"}
 
 
@@ -405,6 +405,29 @@ sequence {html.escape(" → ".join(sm.get("sequence", [])) or "-")} · arc {html
 high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)}</p>
 <p class=muted>channels: {", ".join(em.get("channels", []))}{f" · brain salience agreement r={br:+.2f}" if br is not None else ""}
 · {html.escape(em.get("note", ""))}</p><figcaption>{legend}</figcaption></div>"""
+
+
+def _music_html(r: dict) -> str:
+    import html
+    mu = (r.get("music") or {}).get("summary")
+    mood = (r.get("emotion") or {}).get("music_mood")
+    if not mu and not mood:
+        return ""
+    bits = []
+    if mu:
+        bits.append(f'{mu["tempo_bpm"]:.0f} BPM')
+        bits.append(mu["mode_label"])
+        if mu.get("buildups"):
+            bits.append("build-ups " + ", ".join(f'{_fmt_t(x["start"])}-{_fmt_t(x["end"])} (+{x["rise_db"]:.0f} dB)'
+                                                 for x in mu["buildups"][:3]))
+        if mu.get("drops"):
+            bits.append("drops at " + ", ".join(_fmt_t(x["at"]) for x in mu["drops"][:4]))
+        if mu.get("beat_cut_sync") is not None:
+            bits.append(f'cuts on the beat {mu["beat_cut_sync"]:.0%}')
+    if mood:
+        bits.append("mood " + " → ".join(mood.get("sequence", [])[:6]) + " (" +
+                    ", ".join(f"{k} {v:.0%}" for k, v in mood.get("shares", {}).items()) + ")")
+    return f'<p><b>Music</b>: {html.escape(" · ".join(bits))}</p>'
 
 
 def _suggestions_html(r: dict, job_id: str) -> str:
@@ -607,6 +630,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 <h1>Hookline report <span>{job_id} ({mode})</span></h1>
 <p class=muted>{html.escape(Path(r.get('video', '')).name)} · {r.get('duration_s', '?')}s{mods_txt}</p>
 {gate_html}
+{_music_html(r)}
 <div class="tiles">
 {tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
 {tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}

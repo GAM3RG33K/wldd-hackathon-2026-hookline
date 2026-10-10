@@ -617,6 +617,20 @@ class Hookline(App):
         if line:
             moments.append("\n")
             moments.append(line)
+        mu = (r.get("music") or {}).get("summary")
+        mood = (r.get("emotion") or {}).get("music_mood")
+        if mu or mood:
+            moments.append("\nmusic: ", "dim")
+            bits = []
+            if mu:
+                bits.append(f"{mu['tempo_bpm']:.0f} BPM {mu['mode_label']}")
+                if mu.get("buildups"):
+                    bits.append("build-ups " + ", ".join(f"{fmt_t(x['start'])}-{fmt_t(x['end'])}" for x in mu["buildups"][:3]))
+                if mu.get("beat_cut_sync") is not None:
+                    bits.append(f"cuts on beat {mu['beat_cut_sync']:.0%}")
+            if mood:
+                bits.append("mood " + " → ".join(mood.get("sequence", [])[:5]))
+            moments.append(" · ".join(bits), "cyan")
         em = r.get("emotion")
         if em:
             sm = em["summary"]

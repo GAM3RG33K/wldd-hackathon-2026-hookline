@@ -27,7 +27,10 @@ GO_MAP = {
     "warmth": {"love": 1.0, "caring": 1.0, "gratitude": 0.8, "joy": 0.5, "admiration": 0.3},
     "sadness": {"sadness": 1.0, "grief": 1.0, "remorse": 0.7, "disappointment": 0.7},
 }
-CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8}
+CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9}
+# CLAP music mood -> our emotions ("calm"/"none" carry no emotion)
+MUSIC_MAP = {"sad": {"sadness": 1.0}, "uplifting": {"warmth": 0.5, "awe": 0.5}, "epic": {"awe": 1.0},
+             "tense": {"tension": 1.0}, "happy": {"amusement": 0.5, "warmth": 0.5}, "funny": {"amusement": 1.0}}
 VISUAL_TEMPER = 0.5  # flattens CLIP's sharp softmax so one prompt can't take every second
 
 
@@ -68,6 +71,17 @@ def fuse(report, extra):
             if row.sum() > 0:
                 dist[t] += CHANNEL_WEIGHT["text"] * mass * row / row.sum()
                 weight[t] += CHANNEL_WEIGHT["text"] * mass
+
+    music = cues.get("music") or {}
+    if music:
+        used.append("music")
+        keys = list(music)
+        M = np.array([_seconds(music.get(k), n, 0.0) for k in keys], dtype=float).T ** VISUAL_TEMPER
+        M = M / np.maximum(M.sum(1, keepdims=True), 1e-9)
+        for j, k in enumerate(keys):
+            for e, w in MUSIC_MAP.get(k, {}).items():
+                dist[:, EMOTIONS.index(e)] += CHANNEL_WEIGHT["music"] * w * M[:, j]
+                weight += CHANNEL_WEIGHT["music"] * w * M[:, j]
 
     sounds = gate.get("sounds_per_second") or {}
     if sounds:
@@ -121,13 +135,27 @@ def fuse(report, extra):
     }
     strong = strong_emotions(extra, n)
     block["strong"] = strong
+    music = cues.get("music") or {}
+    if music:  # music mood mix + its order over time (e.g. sad -> uplifting)
+        keys = [k for k in music if k not in ("none",)]
+        M = np.array([_seconds(music.get(k), n, 0.0) for k in keys], dtype=float).T
+        top = [keys[i] for i in M.argmax(1)]
+        from collections import Counter
+        c = Counter(top)
+        seq = []
+        for m in top:
+            if not seq or seq[-1] != m:
+                seq.append(m)
+        block["music_mood"] = {"shares": {k: round(v / n, 2) for k, v in c.most_common(4)}, "sequence": seq[:8],
+                               "per_second": top}
     feats_out = {f"emo_{k}": v for k, v in feats.items() if isinstance(v, (int, float))}
     feats_out.update(emo_strong_share=strong["share"], emo_strength=strong["score"])
     return block, feats_out
 
 
 # Strong emotions = intense PEAKS of awe, laughter, outrage/anger, sorrow (not tone, not mild feelings).
-STRONG = {"laughter": "amusement", "awe": "awe", "outrage": "outrage", "sorrow": "sadness"}
+STRONG = {"laughter": "amusement", "awe": "awe", "outrage": "outrage", "sorrow": "sadness", "moved": None}
+MOVED_LOOKBACK, MOVED_LOOKAHEAD = 12, 4  # sadness in the last 12s turning to uplift in the next 4s
 STRONG_LEVEL = 0.6       # absolute evidence needed at the peak (0..1)
 STRONG_PROMINENCE = 0.15  # must spike above its surroundings: a flat plateau (steady tone) never counts
 STRONG_DROP = 0.15        # a peak lasts while evidence stays within this of the peak
@@ -146,21 +174,38 @@ def strong_emotions(extra, n):
     def ser(x, d=0.0):
         return np.array([(d if v is None else v) for v in (list(x or []) + [d] * n)[:n]], dtype=float)
 
+    mus = em.get("music") or {}
     txt = {e: np.clip(np.array([sum((d or {}).get(k, 0) * w for k, w in GO_MAP[e].items()) if d else 0.0
                                 for d in (list(text) + [None] * n)[:n]]), 0, 1) for e in EMOTIONS}
     voice = ser((em.get("voice") or {}).get("arousal"))
     evidence = {}
     for s, base in STRONG.items():
+        if base is None:
+            continue
         parts = [VISUAL_STRONG_WEIGHT * ser(vis.get(base)), txt[base]]
         if s == "laughter":
-            parts += [ser(snd.get("amusement")), 0.6 * txt[base] + 0.4 * voice]   # laughter sounds; funny line, lively voice
+            parts += [ser(snd.get("amusement")), 0.6 * txt[base] + 0.4 * voice,   # laughter sounds; funny line, lively voice
+                      0.8 * ser(mus.get("funny"))]                                 # comedic music
         elif s == "awe":
-            parts += [ser(snd.get("awe"))]                                         # cheering / applause
+            parts += [ser(snd.get("awe")), 0.8 * ser(mus.get("epic"))]           # cheering / applause; epic music
         elif s == "outrage":
             parts += [0.6 * txt[base] + 0.4 * voice]                               # angry words, raised voice
         elif s == "sorrow":
-            parts += [ser(snd.get("sadness"))]                                     # crying, sighs
+            parts += [ser(snd.get("sadness")), 0.8 * ser(mus.get("sad"))]        # crying, sighs; sad music
         evidence[s] = np.clip(np.max(parts, axis=0), 0, 1)
+    # "moved" (kama muta): sadness turning into uplift - rescues, reunions, kindness
+    sad = np.max([0.8 * ser(mus.get("sad")), VISUAL_STRONG_WEIGHT * ser(vis.get("sadness")), txt["sadness"]], axis=0)
+    up = np.max([0.8 * ser(mus.get("uplifting")), 0.6 * ser(mus.get("epic")),
+                 VISUAL_STRONG_WEIGHT * ser(vis.get("warmth")), txt["warmth"]], axis=0)
+    moved = np.zeros(n)
+    for t in range(n):
+        before = sad[max(0, t - MOVED_LOOKBACK):t + 1].max()
+        after = up[t:min(n, t + MOVED_LOOKAHEAD + 1)].max()
+        moved[t] = min(before, after) * 1.4  # both halves must be present; 1.4 maps a clear turn (~0.45) to ~0.63
+    build = np.zeros(n)
+    for b in ((extra or {}).get("music_summary") or {}).get("buildups", []):
+        build[b["start"]:b["end"] + 1] = 0.1  # an energy build-up landing on the turn strengthens it
+    evidence["moved"] = np.clip(moved + build * (moved > 0), 0, 1)
     moments = []
     for s, x in evidence.items():
         idx, _ = find_peaks(x, prominence=STRONG_PROMINENCE)
@@ -181,7 +226,7 @@ def strong_emotions(extra, n):
             "seconds": len(seconds), "share": round(share, 3),
             "score": round(100 * min(1.0, share / STRONG_FULL), 1),
             "max_evidence": {s: round(float(v.max()), 2) for s, v in evidence.items()},
-            "definition": "peaks of laughter, awe, outrage/anger, sorrow; steady tone does not count"}
+            "definition": "peaks of laughter, awe, outrage/anger, sorrow, being moved; steady tone does not count"}
 
 
 def features(arousal, valence, probs, intensity, report):

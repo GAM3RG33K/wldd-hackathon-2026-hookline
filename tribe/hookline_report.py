@@ -361,6 +361,15 @@ def analyse(out_dir, video=None):
         **{f"net_{g}": round(float(v.mean()), 5) for g, v in net_t.items()},
     }
     features.update(peak_features(A))
+    music = None
+    try:  # rhythm / energy / mode of the audio (optional: needs librosa)
+        import audio_music as AMU
+        res = AMU.analyse_music(video, T, cuts)
+        if res:
+            music, mfeat = res
+            features.update(mfeat)
+    except ImportError:
+        pass
     if VIRALITY_MODEL:
         m = VIRALITY_MODEL
         z = m["bias"] + sum(w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k])
@@ -399,6 +408,7 @@ def analyse(out_dir, video=None):
                    "network_z": {g: [round(float(x), 2) for x in v] for g, v in net_z.items()},
                    # absolute TRIBE engagement per second: comparable between an original and its edit
                    "engagement_raw": [round(float(x), 5) for x in eng_raw]},
+        "music": music,
         # word-level timeline (exact captions for suggestions); empty when no transcript was used
         "words_timeline": [{"t": round(float(w["start"]), 2), "w": str(w["text"])} for w in words
                            if speech_known and str(w.get("text", "")).strip()],
@@ -442,7 +452,7 @@ def finalize(report, extra):
         report["method"] += f"; partial modalities ({used}), diagnostic run"
     import emotion_fusion as EF
     import suggest as SG
-    block, efeat = EF.fuse(report, extra)
+    block, efeat = EF.fuse(report, {**(extra or {}), "music_summary": (report.get("music") or {}).get("summary")})
     if block:
         report["emotion"] = block
         report.setdefault("features", {}).update(efeat)
