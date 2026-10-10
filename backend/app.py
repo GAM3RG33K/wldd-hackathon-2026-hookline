@@ -227,12 +227,24 @@ def _chart_svg(r: dict) -> str:
     step = max(1, round(T / 10 / 5) * 5) if T > 20 else (2 if T > 8 else 1)
     ticks = "".join(f'<span style="left:{100 * t / T:.2f}%">{_fmt_t(t)}</span>' for t in range(0, T + 1, step))
     peak_lbl = f'<span class="pk" style="left:{100 * (pk + 0.5) / T:.2f}%">peak {_fmt_t(pk)}</span>' if pk is not None else ""
+    dots = ""
+    em = r.get("emotion")
+    if em:  # emotion dots sit on the attention curve: colour = emotion, size = arousal
+        s_ = em["series"]
+        for i, (d, a_) in enumerate(zip(s_["dominant"], s_["arousal"])):
+            if d == "neutral" or i >= T:
+                continue
+            size = 6 + 10 * float(a_)
+            y = 100 - max(0, min(100, att[i]))
+            dots += (f'<i class=edot title="{_fmt_t(i)} {d} (arousal {a_:.2f})" style="left:{100 * (i + 0.5) / T:.2f}%;'
+                     f'top:{y:.2f}%;width:{size:.0f}px;height:{size:.0f}px;background:{EMO_COLORS.get(d, "#888")}"></i>')
     title = html.escape(f"Attention per second, {T}s")
     return f"""<figure class="chart" aria-label="{title}">
   <div class="plot">
     <div class="yax"><span style="top:0">100</span><span style="top:50%">50</span><span style="top:100%">0</span></div>
     <svg viewBox="0 0 {T} 100" preserveAspectRatio="none" role="img"><title>{title}</title>{''.join(parts)}</svg>
     <div class="peaklbl">{peak_lbl}</div>
+    <div class="edots">{dots}</div>
     <div class="playhead" id="playhead" hidden></div>
   </div>
   <div class="xax">{ticks}</div>
@@ -529,8 +541,8 @@ def view_report(job_id: str):
 <title>Hookline report {job_id}</title>
 {'<meta http-equiv=refresh content=10>' if str(r.get('verify_status', '')).startswith('running') else ''}
 <style>
-:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#ea8a0c;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#f5a524}}}}
+:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#9ca3af;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#8b8f97}}}}
 body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
 a{{color:var(--att)}} .song{{color:var(--strong)}}
 h1 span{{color:var(--muted);font-weight:500}} .muted{{color:var(--muted)}}
@@ -560,6 +572,8 @@ details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;marg
 .player video{{width:100%;max-height:60vh;border-radius:12px;background:#000}}
 .player code{{font-size:.7rem;word-break:break-all}}
 .playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
+.edots .edot{{position:absolute;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid var(--bg);
+  box-shadow:0 0 0 1px rgba(0,0,0,.25);cursor:default}}
 .emo .band{{display:flex;height:18px;margin:.6rem 0 0 36px;border-radius:4px;overflow:hidden}}
 .emo .band i{{display:block}} .emo p{{margin:.4rem 0 0 36px;font-size:.9rem}} .emo figcaption{{margin-left:36px}}
 ol.sugs li{{margin:.6rem 0}} .badge{{display:inline-block;font-size:.75rem;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin-left:4px}}

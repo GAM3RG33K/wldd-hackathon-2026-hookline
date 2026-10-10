@@ -141,6 +141,8 @@ def eta_text(p):
     return "ETA unknown"
 
 
+EMO_STYLE = {"amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
+             "tension": "#ef4444", "outrage": "#b91c1c", "warmth": "#22c55e", "sadness": "#3b82f6"}
 AUDIO_TYPES = {"song": "song", "speech_over_music": "speech over music", "speech": "speech",
                "instrumental": "instrumental music", "humming": "humming / chant", "other": "no clear speech"}
 
@@ -212,6 +214,17 @@ class AttentionStrip(Widget):
         surv_row = [rows - 1 - min(rows - 1, int(max(0.0, min(100.0, surv[s])) / 100 * rows)) if surv else -1
                     for s in sec]
         mid = rows - 1 - int(rows / 2)
+        # emotion dot on top of each bar: colour = dominant emotion (non-neutral, some arousal)
+        em = (r.get("emotion") or {}).get("series") or {}
+        dom, aro = em.get("dominant") or [], em.get("arousal") or []
+        top_row = [rows - 1 - min(rows - 1, int(level[i] // 8)) for i in range(w)]
+        first_col = {}
+        for i, s in enumerate(sec):
+            first_col.setdefault(s, i)
+        dot_at = {}
+        for s, i in first_col.items():
+            if s < len(dom) and dom[s] != "neutral" and (aro[s] if s < len(aro) else 0) > 0.25:
+                dot_at[i] = EMO_STYLE.get(dom[s], "white")
         out = Text()
         for row in range(rows):
             label = "100" if row == 0 else " 50" if row == mid else "  0" if row == rows - 1 else "   "
@@ -220,12 +233,14 @@ class AttentionStrip(Widget):
             for i, s in enumerate(sec):
                 fill = int(max(0, min(8, level[i] - base)))
                 bar = "red" if s in drops else "green" if s < 3 else "magenta" if s == peak else "cyan"
-                if surv_row[i] == row and fill in (0, 8):  # survival dot, drawn over full bar cells too
-                    out.append("•", f"bold yellow on {bar}" if fill else "bold yellow")
+                if i in dot_at and row == top_row[i]:
+                    out.append("●", f"bold {dot_at[i]}")
+                elif surv_row[i] == row and fill in (0, 8):  # survival dot, drawn over full bar cells too
+                    out.append("•", f"bold white on {bar}" if fill else "grey70")
                 elif fill:
                     out.append(BLOCKS[fill], bar)
                 elif surv_row[i] == row:
-                    out.append("•", "yellow")
+                    out.append("•", "grey70")
                 elif row == mid:
                     out.append("┈", "dim")
                 else:
@@ -250,10 +265,10 @@ class AttentionStrip(Widget):
                 axis[x:x + len(lbl)] = list(lbl)
         out.append(" " * self.GUTTER + "".join(axis) + "\n", "dim")
         out.append(" " * self.GUTTER)
-        for glyph, style, name in (("█", "cyan", "attention (avg ≈ 50)  "), ("•", "yellow", "viewers remaining %  "),
+        for glyph, style, name in (("█", "cyan", "attention (avg ≈ 50)  "), ("•", "grey70", "viewers remaining %  "),
                                    ("h", "bold green", "hook 0-3s  "), ("!", "bold red", "drop  "),
                                    ("*", "bold magenta", f"peak {fmt_t(peak) if peak >= 0 else '?'}  "),
-                                   ("|", "", "cut")):
+                                   ("|", "", "cut  "), ("●", "bold #f5b301", "emotion (colour = type)")):
             out.append(glyph, style)
             out.append(f" {name}", "dim")
         return out
