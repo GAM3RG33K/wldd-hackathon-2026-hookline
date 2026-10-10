@@ -38,6 +38,23 @@ ENV TRIBE_WHISPER_MODEL=base \
     HOOKLINE_CHUNK_S=10 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Some hardware tiers (seen on a100-large) run the container as a non-root user with
+# HOME=/, so every cache write hit "/.cache: Permission denied". Point HOME and the
+# caches at a writable path, and let any user read the punkt data under /root and
+# patch tribev2 at startup (faster-whisper transcription patch); tribev2 caches features
+# in ./cache, i.e. /app/cache. neuralset pip-installs the spaCy model on first use, which
+# fails for a non-root user, so it is installed here.
+ENV HOME=/tmp/home \
+    HF_HOME=/tmp/hf \
+    XDG_CACHE_HOME=/tmp/cache \
+    TORCH_HOME=/tmp/torch \
+    NLTK_DATA=/root/nltk_data
+RUN mkdir -p /tmp/home /tmp/hf /tmp/cache /tmp/torch && chmod -R a+rwX /tmp \
+ && chmod a+rx /root && chmod -R a+rX /root/nltk_data \
+ && chmod -R a+rwX "$(python -c 'import importlib.util as u, os; print(os.path.dirname(u.find_spec("tribev2").origin))')" \
+ && mkdir -p /app/cache && chmod -R a+rwX /app \
+ && python -m spacy download en_core_web_lg -q
+
 COPY tribe_analyze.py hookline_report.py app.py ./
 
 EXPOSE 7860

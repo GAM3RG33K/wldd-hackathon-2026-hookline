@@ -114,3 +114,17 @@
   The V-JEPA2 reload took only 1.2s on the warm run (weights in page cache), so keeping
   models loaded matters little. neuralset builds V-JEPA2 as a local variable, so it isn't kept on the extractor anyway.
 - Hardware moved to a100-large ($2.50/hr) at the user's request. Sleep time is still 48h; suggested 1800s.
+
+## a100-large ($2.50/hr, sleep 1800s)
+- The first A100 jobs failed in 2s with `Permission denied: '/.cache'`: this tier runs the
+  container as a non-root user with HOME=/. The faster-whisper patch also failed (it couldn't
+  write site-packages). Fix (final Dockerfile layers, no torch reinstall): HOME, HF_HOME,
+  XDG_CACHE_HOME and TORCH_HOME under /tmp, NLTK_DATA readable, tribev2 dir and /app/cache
+  writable, and spaCy en_core_web_lg pre-installed (neuralset pip-installs it on first use,
+  which also fails as non-root).
+- Test reel: samples/face/videos/FC013.mp4 (72.4s, random pick, instead of sneaker).
+  - video+audio (job 4167e700): 200s total. Video 174s over 7 chunks of about 23s each
+    (T4: 80-95s per chunk, so 3.8x). Model loads about 4s each. Scores: hook 45.7, hold 6.9,
+    finish 3.2, virality 35.1.
+  - all three (job d604de1a): failed on the missing spaCy model after transcribe 61.7s
+    and add_text 7.6s. Re-running after the fix.
