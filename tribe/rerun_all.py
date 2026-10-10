@@ -29,7 +29,8 @@ def reels():
         name = r.get("source_id") or (Path(v).stem if v else None)
         if not v or not Path(v).is_file() or name in (None, "input"):
             continue
-        seen.setdefault(name.lower(), (name, v, r.get("duration_s") or 0))
+        cap = (r.get("caption") or {}).get("text") or ""  # keep the caption it was analysed with
+        seen.setdefault(name.lower(), (name, v, r.get("duration_s") or 0, cap))
     return sorted(seen.values(), key=lambda x: x[2])  # shortest first: results land early
 
 
@@ -37,11 +38,12 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def run(name, video):
+def run(name, video, caption=""):
     q = "video=1&audio=1&text=auto&lang=auto"
     for _ in range(3):
         try:
-            res = tui.post_video(f"{SPACE}/analyze?{q}", video, token=TOKEN, timeout=900)
+            res = tui.post_video(f"{SPACE}/analyze?{q}", video, token=TOKEN, timeout=900,
+                                 fields={"caption": caption} if caption else None)
             break
         except Exception as e:  # noqa: BLE001
             log(f"  upload failed ({e}); retry in 30s")
@@ -80,10 +82,10 @@ def main():
     skip = next((a.split("=", 1)[1].split(",") for a in sys.argv if a.startswith("--skip=")), [])
     todo = [x for x in reels() if (not only or x[0] in only) and x[0] not in skip]
     log(f"batch start: {len(todo)} reels, {sum(x[2] for x in todo):.0f}s of video")
-    for i, (name, video, dur) in enumerate(todo, 1):
-        log(f"[{i}/{len(todo)}] {name} ({dur:.0f}s)")
+    for i, (name, video, dur, caption) in enumerate(todo, 1):
+        log(f"[{i}/{len(todo)}] {name} ({dur:.0f}s){' + caption' if caption else ''}")
         try:
-            log("  " + run(name, video))
+            log("  " + run(name, video, caption))
         except Exception as e:  # noqa: BLE001 - keep the batch going
             log(f"  error {type(e).__name__}: {e}")
     log("batch complete")

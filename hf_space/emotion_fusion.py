@@ -12,12 +12,14 @@ from collections import Counter
 
 import numpy as np
 
+import caption as CAP
 import taxonomy as TX
 
 EMOTIONS = TX.NAMES
 AROUSAL = {e: TX.EMOTIONS[e][0] for e in EMOTIONS}
 VALENCE = {e: TX.EMOTIONS[e][1] for e in EMOTIONS}
-CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9, "face": 1.0}
+CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9, "face": 1.0,
+                  "caption": CAP.CAPTION_EMO_WEIGHT}  # caption: reel-wide context, already x relevance
 FACE_SMOOTH_S = 3  # face expression per frame jitters (happy 0.99 -> sad 0.97 a second later): 3s mean
 ZS_SCALE = {"visual": 40.0, "music": 40.0}  # softmax sharpness over raw similarities (no calibration yet)
 Z_SCALE = {"visual": 1.5, "music": 1.5}      # softmax sharpness over calibrated z-scores
@@ -197,7 +199,8 @@ def channels(extra, n):
     mus, mus_top = music_dist(cues.get("music"), n) if has_music(extra) else (None, None)
     ch = {"visual": visual_dist(cues.get("visual"), n), "music": mus,
           "text": text_dist((cues.get("text") or {}).get("probs"), n), "sounds": sound_dist(gate.get("sounds_per_second"), n),
-          "face": face_dist(cues.get("face"), n)}
+          "face": face_dist(cues.get("face"), n),
+          "caption": CAP.emotion_channel(CAP.assess(extra), n)}
     voice = cues.get("voice") or {}
     va = np.array([x if x is not None else np.nan for x in _seconds(voice.get("arousal"), n)], dtype=float)
     vv = np.array([x if x is not None else np.nan for x in _seconds(voice.get("valence"), n)], dtype=float)
@@ -293,7 +296,7 @@ def strong_emotions(ch, voice_arousal, n, trust=None):
         j = EMOTIONS.index(e)
         parts = [np.zeros(n)]
         for k, D in ch.items():
-            if D is not None:
+            if D is not None and k != "caption":  # caption has no timing: context, never a peak
                 parts.append(weight(k) * np.clip(D[:, j], 0, 1))
         if ch.get("text") is not None and AROUSAL[e] >= 0.65:
             parts.append(trust.get("text", 1.0) * (0.6 * np.clip(ch["text"][:, j], 0, 1) + 0.4 * va))
@@ -302,7 +305,7 @@ def strong_emotions(ch, voice_arousal, n, trust=None):
     neg = np.max([evidence["sadness"], evidence["empathic_pain"]], axis=0)
     pos = np.zeros(n)
     for k, D in ch.items():
-        if D is not None:
+        if D is not None and k != "caption":
             pos = np.maximum(pos, weight(k) * np.clip(D[:, EMOTIONS.index("hope")] + D[:, EMOTIONS.index("moved")], 0, 1))
     turn = np.array([min(neg[max(0, t - 12):t + 1].max(), pos[t:min(n, t + 5)].max()) * 1.4 for t in range(n)])
     evidence["moved"] = np.clip(np.maximum(evidence["moved"], turn), 0, 1)

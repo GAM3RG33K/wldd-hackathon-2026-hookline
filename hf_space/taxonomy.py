@@ -107,3 +107,34 @@ FACE_MAP = {"angry": {"anger": 1.0}, "sad": {"sadness": 1.0}, "fear": {"fear": 1
 
 # AudioSet sound events (from the speech-gate AST pass) -> taxonomy
 SOUND_MAP = {"amusement": "amusement", "awe": "awe", "surprise": "surprise", "tension": "fear", "sadness": "sadness"}
+
+# Caption relevance controls: captions that say nothing about any particular video, or about a
+# different one. A creator's caption must beat these on THIS video (frames or transcript) to count.
+CAPTION_CONTROLS = [
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+    "lorem ipsum is the dummy text of the printing industry",
+    "follow for more #viral #trending #explore #fyp",
+    "like share and subscribe, link in bio",
+    "good morning everyone, have a nice day",
+    "new post, check it out",
+    "easy pasta recipe in 10 minutes",
+    "football match highlights, what a goal",
+    "car engine repair tutorial step by step",
+    "stock market news and crypto price update",
+    "unboxing the new smartphone",
+    "beach sunset travel vlog",
+    "gym workout for bigger arms",
+    "makeup tutorial for beginners",
+    "cute puppy playing in the garden",
+    "wedding dance performance",
+    "rainy day in the mountains",
+    "coding tutorial in python",
+    "street food tour in the city",
+    "funny cat compilation",
+    "aaj ka din bahut accha tha",
+    "mera naya video dekho aur share karo",
+    "motivational quote of the day",
+    "home cleaning hacks",
+    "bike stunt on the highway",
+]
+

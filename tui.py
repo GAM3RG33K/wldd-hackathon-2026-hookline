@@ -66,11 +66,15 @@ def http_bytes(url, token="", timeout=60):
         return r.read()
 
 
-def post_video(url, path, token="", timeout=600):
+def post_video(url, path, token="", timeout=600, fields=None):
+    """Multipart upload: the video plus optional text form fields (e.g. caption)."""
     boundary = uuid.uuid4().hex
+    body = b""
+    for k, v in (fields or {}).items():
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
     head = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"video\"; "
             f"filename=\"{Path(path).name}\"\r\nContent-Type: video/mp4\r\n\r\n").encode()
-    body = head + Path(path).read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+    body += head + Path(path).read_bytes() + f"\r\n--{boundary}--\r\n".encode()
     return http_json(url, token, timeout, data=body,
                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
 
@@ -136,13 +140,19 @@ def load_corpus():
     return corpus
 
 
-# Page size marker, shown next to views as context only (never a scoring input: judge the video).
-PAGE_SIZE = {"10k-50k": ("!", "small creator"), "50k-200k": ("$", "medium page"),
-             "200k-1M": ("$$", "big creator"), "1M+": ("$$$", "highest followers")}
+# Page size, shown next to views as context only (never a scoring input: judge the video).
+# Plain follower ranges read without a legend; the size word is for the reel card.
+PAGE_SIZE = {"10k-50k": "small creator", "50k-200k": "medium page", "200k-1M": "big creator", "1M+": "top creator"}
 
 
-def page_marker(band):
-    return PAGE_SIZE.get((band or "").strip(), ("?", "unknown page size"))
+def followers_text(band):
+    """'50k-200k' -> '50k–200k followers'; unknown -> ''."""
+    band = (band or "").strip()
+    return f"{band.replace('-', '–')} followers" if band else ""
+
+
+def page_size(band):
+    return PAGE_SIZE.get((band or "").strip(), "unknown page size")
 
 
 def analysed_at(report_json):
@@ -435,6 +445,37 @@ class SpaceScreen(ModalScreen):
         self.app.space_action(verb, self)
 
 
+class CaptionPrompt(ModalScreen):
+    """Optional caption before an analysis. Enter = go (empty = no caption), Esc = cancel the run."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
+    DEFAULT_CSS = """
+    CaptionPrompt { align: center middle; }
+    CaptionPrompt > Vertical { width: 84; height: auto; border: round $accent; padding: 1 2; background: $panel; }
+    CaptionPrompt Input { margin-top: 1; }
+    """
+
+    def __init__(self, name, prefill=""):
+        super().__init__()
+        self.reel, self.prefill = name, prefill
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text.assemble(("Caption for ", ""), (self.reel, "bold"), (" (optional)\n", ""),
+                                       ("Paste the post caption, or leave it empty and press Enter.\n"
+                                        "It is only used if it describes this video (checked against its frames and "
+                                        "speech);\nan unrelated or filler caption is ignored. Esc cancels.", "dim")))
+            yield Input(value=self.prefill, placeholder="e.g. Rs 200 ka cleaning hack jo har ghar mein hona chahiye")
+
+    def on_mount(self):
+        self.query_one(Vertical).border_title = "Analyze"
+        self.query_one(Input).focus()
+
+    @on(Input.Submitted)
+    def done(self, ev: Input.Submitted):
+        self.dismiss(ev.value.strip())
+
+
 class RunOptions(ModalScreen):
     """What a full TRIBE run uses. Disabled modalities never load their model on the Space."""
 
@@ -527,9 +568,8 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   tab      switch between reels and report
   ?        this help        q  quit
 
-[b]Page size[/b] (next to views; context only, never a scoring input)
-  !  small creator 10k-50k    $  medium page 50k-200k
-  $$ big creator 200k-1M      $$$ highest followers 1M+
+[b]Views and followers[/b] (next to each sample reel)
+  The page's follower range is context only, never a scoring input: Hookline judges the video.
 
 [b]Reading the scores[/b]
   Scores are within-video, uncalibrated heuristics: the average second ≈ 50.
@@ -562,7 +602,7 @@ class Hookline(App):
     Screen { layout: vertical; }
     #top { height: 1; background: $panel; padding: 0 1; }
     #main { height: 1fr; }
-    #reels { width: 34; border: round $panel-lighten-2; scrollbar-size-vertical: 1; }
+    #reels { width: 46; border: round $panel-lighten-2; scrollbar-size-vertical: 1; }
     #reels:focus-within { border: round $accent; }
     #right { width: 1fr; border: round $panel-lighten-2; padding: 0 1; scrollbar-size-vertical: 1; }
     #right:focus-within { border: round $accent; }
@@ -650,10 +690,10 @@ class Hookline(App):
             items = self.corpus[s]
             node = tree.root.add(f"{s} ({len(items)})", data={"kind": "folder"}, expand=(s == "face"))
             for v in items:
-                mark, _ = page_marker(v.get("followers"))
-                label = Text(f"{v['id']} ")
-                label.append(f"{mark:<3} ", "bold yellow" if mark.startswith("$") else "bold cyan")
-                label.append(f"{fmt_views(v['views'])} views", "dim")
+                label = Text(f"{v['id']:<6} ")
+                label.append(f"{fmt_views(v['views']):>5} views", "")
+                if v.get("followers"):
+                    label.append(f" · {followers_text(v['followers'])}", "dim")
                 node.add_leaf(label, data={"kind": "reel", **v})
         if not any(self.corpus.values()):
             tree.root.add_leaf(Text("no samples/ folder found", "dim"), data={"kind": "folder"})
@@ -849,6 +889,13 @@ class Hookline(App):
                 moments.append(f"{d:+.1f}", "green" if d >= 0 else "red")
             if r["scores"].get("virality_summary"):
                 moments.append("\n" + r["scores"]["virality_summary"], "dim italic")
+        cap = r.get("caption")
+        if cap:  # only when the creator gave one
+            ok = cap.get("relevance", 0) > 0
+            moments.append("\ncaption: ", "dim")
+            moments.append(f"\"{cap['text'][:90]}{'…' if len(cap['text']) > 90 else ''}\" ", "italic")
+            moments.append(cap.get("verdict", ""), "green" if ok else "yellow")
+            moments.append(f" · viral +{cap.get('virality_points', 0):.1f}" if ok else " · no effect", "bold" if ok else "dim")
         line = audio_text(r.get("audio"), r.get("speech_gate"))
         if line:
             moments.append("\n")
@@ -920,9 +967,8 @@ class Hookline(App):
         self.current_job = None
         for w in ("#tiles", "#strip-h", "#strip", "#moments", "#recs-h", "#recs", "#method"):
             self.query_one(w).display = False
-        mark, size = page_marker(d.get("followers"))
-        views = (f"{fmt_views(d.get('views'))} views · {mark} {size} ({d.get('followers')} followers) · "
-                 if d.get("views") else "")
+        views = (f"{fmt_views(d.get('views'))} views · {followers_text(d.get('followers'))} "
+                 f"({page_size(d.get('followers'))}) · " if d.get("views") else "")
         self.query_one("#title", Static).update(Text.assemble(
             (d["id"], "bold"), (f"   {d.get('stratum', '')}\n\n", "dim"),
             (f"{views}{short_path(d['path'])}\n", "dim"),
@@ -1023,26 +1069,42 @@ class Hookline(App):
         if not self.token:
             self.say("No HF token: run `hf auth login` or export HF_TOKEN, then restart.", "yellow")
             return
-        if self.space_run or self.queue:
-            self.enqueue(d)
-            return
         stage = self.space_rt.get("stage")
-        if stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR"):
+        busy = self.space_run or self.queue
+        if not busy and (stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR")):
             word = STAGE_VIEW.get(stage, ("", (stage or "").lower(), ""))[1]
             self.say(f"GPU Space is {word}: press S to start it, then a to analyze {d['id']}.", "yellow")
             return
+        self.push_screen(CaptionPrompt(d["id"], self.last_caption(d)), lambda cap: self.analyze_with(d, cap))
+
+    def last_caption(self, d):
+        """Prefill: the caption this video was analysed with last time, if any."""
+        job = self.report_for(d)
+        try:
+            return ((json.loads((OUT / job / "report.json").read_text()).get("caption") or {}).get("text") or "") if job else ""
+        except (OSError, ValueError):
+            return ""
+
+    def analyze_with(self, d, caption):
+        if caption is None:
+            self.say(f"Analysis of {d['id']} cancelled.", "dim")
+            return
+        opts = {"mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang, "caption": caption}
+        if self.space_run or self.queue:
+            self.enqueue(d, opts)
+            return
         if self.report_for(d):
             self.say(f"Re-analyzing {d['id']}; the new report replaces the current one when it finishes.")
-        self.begin_run(d, {"mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang})
+        self.begin_run(d, opts)
 
-    def enqueue(self, d):
-        """Queue an analysis behind the running one, with the run options as they are now."""
+    def enqueue(self, d, opts):
+        """Queue an analysis behind the running one, with its run options and caption."""
         running = self.space_run["d"]["path"] if self.space_run else None
         if d["path"] == running or any(q["d"]["path"] == d["path"] for q in self.queue):
             pos = next((i + 1 for i, q in enumerate(self.queue) if q["d"]["path"] == d["path"]), 0)
             self.say(f"{d['id']} is already " + (f"queued (#{pos})." if pos else "being analyzed."), "yellow")
             return
-        self.queue.append({"d": d, "mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang})
+        self.queue.append({"d": d, **opts})
         now = self.space_run["d"]["id"] if self.space_run else "the current run"
         self.say(f"Queued {d['id']} (#{len(self.queue)}): starts after {now}. x on a queued item removes it.", "cyan")
         self.update_queue_label()
@@ -1086,11 +1148,13 @@ class Hookline(App):
         """Upload to the Space, then poll its progress API every POLL_S until done/failed."""
         tok = self.token
         mb = Path(d["path"]).stat().st_size / 1e6
-        self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space …")
+        self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space"
+                                        f"{' with caption' if opts.get('caption') else ''} …")
         try:
             m = opts["mods"]
             q = f"video={int(m['video'])}&audio={int(m['audio'])}&text={opts['text_mode']}&lang={opts['lang']}"
-            res = post_video(f"{SPACE}/analyze?{q}", d["path"], token=tok)
+            res = post_video(f"{SPACE}/analyze?{q}", d["path"], token=tok,
+                             fields={"caption": opts["caption"]} if opts.get("caption") else None)
         except Exception as e:
             self.call_from_thread(self.say, f"Space upload failed: {e}", "red")
             return

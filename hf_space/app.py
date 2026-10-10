@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from fastapi import BackgroundTasks, FastAPI, File, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 import hookline_report as HL
@@ -1017,7 +1017,10 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
                         sp = gate.get("speech_per_second") or [0.0] * n
                         segs = j.get("transcript_segments") if j["modalities"].get("text") else []
                         j["emotion"] = EMO.emotion_cues(video, audio, 16000, sp, segs or [], DEVICE,
-                                                        log=lambda m: jlog(job_id, f"  {m}"))
+                                                        log=lambda m: jlog(job_id, f"  {m}"),
+                                                        caption=j.get("caption", ""),
+                                                        transcript=" ".join(s["text"] for s in
+                                                                            (j.get("transcript_segments") or [])))
                 except JobCancelled:
                     raise
                 except Exception as e:  # noqa: BLE001 - emotion is additive, never fatal
@@ -1085,7 +1088,7 @@ def _space_extra(job_id):
             "transcript_dropped": jj.get("transcript_dropped"),
             "audio_match": {"song": am.get("song"), "reuse": am.get("reuse", [])},
             "text_mode": jj.get("text_mode"), "lang": jj.get("lang"), "asr": jj.get("asr"),
-            "emotion": jj.get("emotion")}
+            "emotion": jj.get("emotion"), "caption": jj.get("caption", "")}
 
 
 def _write_outputs(job_id, job, video, source_name, preds, segments):
@@ -1149,7 +1152,7 @@ def health():
 async def analyze(background: BackgroundTasks, video: UploadFile = File(...),
                   video_on: bool = Query(True, alias="video"), audio_on: bool = Query(True, alias="audio"),
                   text: str = Query(DEFAULT_TEXT_MODE), lang: str = Query(DEFAULT_LANG),
-                  asr: str = Query(DEFAULT_ASR)):
+                  asr: str = Query(DEFAULT_ASR), caption: str = Form("")):
     if asr not in ASRS:
         return JSONResponse({"error": f"asr must be one of {sorted(ASRS)}"}, status_code=422)
     if lang not in LANGS:
@@ -1168,11 +1171,11 @@ async def analyze(background: BackgroundTasks, video: UploadFile = File(...),
     with dest.open("wb") as f:
         shutil.copyfileobj(video.file, f)
     return _enqueue(background, job_id, dest, video.filename or dest.name, modalities=mods, lang=lang, asr=asr,
-                    text_mode=text_mode)
+                    text_mode=text_mode, caption=caption.strip()[:2200])  # Instagram's caption limit
 
 
 def _enqueue(background: BackgroundTasks, job_id: str, dest: Path, source: str, restarted_from=None,
-             modalities=None, lang=None, asr=None, text_mode=None):
+             modalities=None, lang=None, asr=None, text_mode=None, caption=""):
     lang = lang or DEFAULT_LANG
     text_mode = text_mode or DEFAULT_TEXT_MODE
     asr = asr or DEFAULT_ASR
@@ -1183,15 +1186,16 @@ def _enqueue(background: BackgroundTasks, job_id: str, dest: Path, source: str, 
                     "step": 0, "steps": len(STEPS), "video_s": round(video_s, 1),
                     "input": str(dest), "source": source, "created": time.time(),
                     "restarted_from": restarted_from, "modalities": modalities, "lang": lang, "asr": asr,
-                    "text_mode": text_mode}
+                    "text_mode": text_mode, "caption": caption or ""}
     on = "+".join(m for m, v in modalities.items() if v)
     jlog(job_id, f"queued {source} ({video_s:.1f}s video, modalities {on}, est {est:.0f}s"
                  f"{', restart of ' + restarted_from if restarted_from else ''}"
+                 f"{', caption ' + str(len(caption)) + ' chars' if caption else ''}"
                  f"{', GPU busy' if GPU_LOCK.locked() else ''})")
     background.add_task(run_job, job_id, dest, source)
     return {"job_id": job_id, "status": "queued", "video_s": round(video_s, 1), "estimate_s": round(est),
             "restarted_from": restarted_from, "modalities": modalities, "lang": lang, "asr": asr,
-            "text_mode": text_mode}
+            "text_mode": text_mode, "caption": bool(caption)}
 
 
 @app.post("/jobs/{job_id}/cancel")
@@ -1222,7 +1226,7 @@ def restart_job(job_id: str, background: BackgroundTasks):
     return _enqueue(background, new_id, Path(j["input"]), j.get("source", "video"), restarted_from=job_id,
                     modalities=dict(j.get("modalities") or DEFAULT_MODALITIES,
                                     text=j.get("text_mode", DEFAULT_TEXT_MODE) != "off"),
-                    lang=j.get("lang"), asr=j.get("asr"), text_mode=j.get("text_mode"))
+                    lang=j.get("lang"), asr=j.get("asr"), text_mode=j.get("text_mode"), caption=j.get("caption", ""))
 
 
 @app.get("/jobs/{job_id}/raw")

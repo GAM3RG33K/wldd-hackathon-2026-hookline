@@ -36,3 +36,4 @@ tribe/out/demo_sneaker/*
 
 # Upstream clone (facebookresearch/tribev2), install from source instead
 tribe/repo/
+!hf_space/caption_gallery.npy

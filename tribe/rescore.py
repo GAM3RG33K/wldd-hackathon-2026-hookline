@@ -25,6 +25,7 @@ OUT = ROOT / "backend" / "out"
 SPACE = os.environ.get("HOOKLINE_SPACE_URL", "https://wlddhq-hookline-tribe.hf.space")
 sys.path.insert(0, str(HERE))
 import audio_music as AMU  # noqa: E402
+import caption as CAP  # noqa: E402
 import emotion_fusion as EF  # noqa: E402
 import hookline_report as HL  # noqa: E402
 import suggest as SG  # noqa: E402
@@ -55,7 +56,7 @@ def fetch_raw(space_job, token=None, out=OUT, dest=None):
 def rescore(job_dir, video=None, source_id=None):
     """(Re)build report.json/md/png in job_dir from job_dir/raw + the local video."""
     import numpy as np
-    for mod in (TX, AMU, EF, SG, HL):  # pick up formula edits without restarting the backend (dependencies first)
+    for mod in (TX, CAP, AMU, EF, SG, HL):  # pick up formula edits without restarting the backend (dependencies first)
         importlib_reload(mod)
     job_dir = Path(job_dir)
     raw = job_dir / "raw"

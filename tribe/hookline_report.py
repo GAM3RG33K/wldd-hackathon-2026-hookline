@@ -491,6 +491,7 @@ def finalize(report, extra):
     elif not all(mods.values()):
         used = "+".join(m for m, on in mods.items() if on)
         report["method"] += f"; partial modalities ({used}), diagnostic run"
+    import caption as CAP
     import emotion_fusion as EF
     import suggest as SG
     block, efeat = EF.fuse(report, extra)
@@ -520,6 +521,27 @@ def finalize(report, extra):
                     "weight": EMO_LIFT, "points": lift, "vs_typical": lift,
                     "explain": f"{kinds} peaks cover {st.get('share', 0):.0%} of the reel; strength {strength:.0f}/100 "
                                f"closes {EMO_LIFT * strength / 100:.0%} of the gap to 100"})
+    cap = CAP.assess(extra)
+    if cap:  # optional creator caption: ignored unless it describes this reel
+        report["caption"] = cap
+        sc = report["scores"]
+        pts = CAP.lift(cap, sc["virality"]) if not VIRALITY_MODEL else 0.0
+        cap["virality_points"] = round(pts, 1)
+        if pts > 0:
+            sc.setdefault("virality_base", sc["virality"])
+            v = sc["virality"] + pts
+            ev = cap["evidence"]
+            how = " and ".join(x for x in (
+                f"its frames (z {ev['frames_z']:.1f} vs other reels)" if ev.get("frames_z") is not None else "",
+                f"its transcript (z {ev['transcript_z']:.1f} vs unrelated captions)" if ev.get("transcript_z") is not None else "")
+                if x)
+            sc.update(virality=round(v, 1), virality_band=band(v), virality_tag=virality_tag(v),
+                      virality_method=sc.get("virality_method", "") + f"; + caption context (relevance {cap['relevance']:.2f})")
+            sc.setdefault("virality_breakdown", []).append({
+                "key": "caption", "label": "Caption context", "value": round(100 * cap["relevance"], 1),
+                "weight": CAP.CAPTION_LIFT, "points": round(pts, 1), "vs_typical": round(pts, 1),
+                "explain": f"caption {cap['verdict']}: checked against {how}; relevance {cap['relevance']:.2f} "
+                           f"closes {CAP.CAPTION_LIFT * cap['relevance']:.0%} of the gap to 100"})
     report["suggestions"] = SG.suggest(report)
     report["scores"]["virality_summary"] = virality_summary(report["scores"])
     return report
@@ -537,6 +559,14 @@ def write_md(r, path):
              f"weakest {fmt(m['weakest_window_s'][0])}-{fmt(m['weakest_window_s'][1])}.", ""]
     drops = ", ".join(f"{fmt(a)}-{fmt(b)}" for a, b in m.get("drop_zones_s", [])) or "none"
     lines += [f"Drop zones: {drops}.", ""]
+    cap = r.get("caption")
+    if cap:
+        ev = cap.get("evidence") or {}
+        lines += ["## Caption", "", f"> {cap['text']}", "",
+                  f"- **Verdict:** {cap['verdict']} (relevance {cap.get('relevance', 0):.2f})",
+                  f"- **Evidence:** frames z {ev.get('frames_z', '-')} vs other reels, transcript z "
+                  f"{ev.get('transcript_z', '-')} vs unrelated captions",
+                  f"- **Effect on viral potential:** +{cap.get('virality_points', 0):.1f}", ""]
     if s.get("virality_breakdown"):
         lines += ["## Why this viral potential", "", s.get("virality_summary", ""), "",
                   "| Factor | Score | Weight | Points | vs typical reel |", "|---|---|---|---|---|"]

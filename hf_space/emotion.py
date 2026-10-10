@@ -24,6 +24,8 @@ TEXT_REPO = "SamLowe/roberta-base-go_emotions"
 MUSIC_REPO = "laion/clap-htsat-fused"  # Apache-2.0, safetensors (the music-only CLAPs are .bin)
 FACE_REPO = "trpakov/vit-face-expression"  # Apache-2.0, safetensors; FER2013 labels: angry disgust fear happy neutral sad surprise
 YUNET = Path(__file__).with_name("models") / "face_detection_yunet_2023mar.onnx"  # OpenCV face detector (Apache-2.0)
+GALLERY = Path(__file__).with_name("caption_gallery.npy")  # CLIP frames of other reels (tribe/build_caption_gallery.py)
+EMBED_REPO = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Apache-2.0, 50+ languages incl. Hindi
 # Music mood prompts (two per mood); per-second softmax over moods from 4s windows.
 
 # Two CLIP prompts per emotion plus a neutral anchor; scores are averaged per emotion.
@@ -166,6 +168,55 @@ def _face(frames, device):
     return {"probs": probs, "faces": count, "area": area}
 
 
+def _embed(texts, device):
+    """Mean-pooled, L2-normalised multilingual sentence embeddings (no sentence-transformers dependency)."""
+    from transformers import AutoModel, AutoTokenizer
+    if "embed" not in _M:
+        _M["embed"] = (AutoModel.from_pretrained(EMBED_REPO, use_safetensors=True).eval().to(device),
+                       AutoTokenizer.from_pretrained(EMBED_REPO))
+    model, tok = _M["embed"]
+    with torch.inference_mode():
+        x = tok(texts, padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+        h = model(**x).last_hidden_state
+        m = x["attention_mask"].unsqueeze(-1).float()
+        e = (h * m).sum(1) / m.sum(1).clamp(min=1e-6)
+        return torch.nn.functional.normalize(e, dim=-1).float().cpu().numpy()
+
+
+def _caption(caption, frames, transcript, device):
+    """Raw relevance evidence for a creator caption: similarity of the caption AND of fixed unrelated
+    control captions to every frame (CLIP) and to the transcript (multilingual embeddings), plus the
+    caption's own GoEmotions labels. Deciding relevance and effect happens locally."""
+    import taxonomy as TX
+    texts = [caption] + list(TX.CAPTION_CONTROLS)
+    out = {"text": caption, "controls": len(TX.CAPTION_CONTROLS)}
+    model, proc = _M["clip"]
+    with torch.inference_mode():
+        tin = proc(text=texts, return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+        tf = model.get_text_features(**tin)
+        tf = tf / tf.norm(dim=-1, keepdim=True)
+        sims = []
+        for i in range(0, len(frames), 32):
+            iin = proc(images=frames[i:i + 32], return_tensors="pt").to(device)
+            imf = model.get_image_features(**iin)
+            imf = imf / imf.norm(dim=-1, keepdim=True)
+            sims.append((imf @ tf.T).float().cpu().numpy())
+    S = np.concatenate(sims) if sims else np.zeros((0, len(texts)))
+    out["frame_sim"] = [round(float(x), 4) for x in S[:, 0]]              # caption vs each frame
+    if GALLERY.exists():  # caption vs other reels: mean of each reel's top 3 of 8 frames (specificity)
+        G = np.load(GALLERY).astype(np.float32)
+        g = np.einsum("rfd,d->rf", G, tf[0].float().cpu().numpy())
+        out["gallery_sim"] = [round(float(np.sort(r[~np.isnan(r)])[-3:].mean()), 4) for r in g]
+    out["frame_control_sim"] = [[round(float(x), 4) for x in row] for row in S[:, 1:]]
+    if transcript and transcript.strip():
+        E = _embed([transcript[:2000]] + texts, device)
+        cos = E[1:] @ E[0]
+        out["transcript_sim"] = round(float(cos[0]), 4)
+        out["transcript_control_sim"] = [round(float(x), 4) for x in cos[1:]]
+    out["emotion"] = _text([{"start": 0, "end": 0, "text": caption}], 1, device)["probs"][0]
+    return out
+
+
 def _text(segments, n, device):
     from transformers import pipeline
     if "text" not in _M:
@@ -191,6 +242,7 @@ def warm(device):
     status = {}
     for name, fn in (("visual", lambda: _clip([Image.new("RGB", (64, 64))], device)),
                      ("face", lambda: _face([Image.new("RGB", (64, 64))], device)),
+                     ("embed", lambda: _embed(["warm up"], device)),
                      ("voice", lambda: _voice(np.zeros(32000, dtype=np.float32), 16000, [1.0], device)),
                      ("text", lambda: _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device)),
                      ("music", lambda: _music(np.zeros(32000, dtype=np.float32), 2, device))):
@@ -202,14 +254,17 @@ def warm(device):
     return status
 
 
-def emotion_cues(video, audio, sr, speech_prob, segments, device, log=print):
+def emotion_cues(video, audio, sr, speech_prob, segments, device, log=print, caption="", transcript=""):
     """Run every channel; a failing channel is skipped (logged), never fatal."""
     out, n = {}, len(speech_prob)
     with tempfile.TemporaryDirectory() as tmp:
         t0 = time.time()
         frames = _frames(video, tmp)
         log(f"emotion: {len(frames)} frames in {time.time() - t0:.1f}s")
-        for name, fn in (("visual", lambda: _clip(frames, device)), ("face", lambda: _face(frames, device))):
+        chans = [("visual", lambda: _clip(frames, device)), ("face", lambda: _face(frames, device))]
+        if caption:
+            chans.append(("caption", lambda: _caption(caption, frames, transcript, device)))
+        for name, fn in chans:
             t0 = time.time()
             try:
                 out[name] = fn()

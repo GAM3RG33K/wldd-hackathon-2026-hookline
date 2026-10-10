@@ -27,4 +27,4 @@ Front end: Textual TUI (`tui.py`, `./run-demo.sh`) + web report (`backend/app.py
 3. Space change → `hf upload wlddhq/hookline-tribe hf_space . --repo-type space`, wait for stage `RUNNING` (not `RUNNING_BUILDING`), `/health` `boot.emotion_models` = `ready`, then one short reel end to end (TUI `a`, or `python tribe/rerun_all.py --only=<name>`).
 4. TUI change → headless Textual `run_test` with the GPU upload stubbed; never claim a run started without checking `/jobs`.
 5. New weights/thresholds → update `CFG` / `VIRALITY_WEIGHTS` in `hookline_report.py` + `.ai/research/scoring-heuristic.md`; keep `PENDING_FIT` until fitted on real view counts.
-6. No handle/follower leakage: grep new code for `follower|handle` as signal; only allow in display (page-size marker) and validation scripts.
+6. No handle/follower leakage: grep new code for `follower|handle` as signal; only allow in display (follower range next to views) and validation scripts.

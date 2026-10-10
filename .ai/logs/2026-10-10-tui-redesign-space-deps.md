@@ -355,3 +355,10 @@
 ## 2026-10-11 — Docs refresh + checkpoint
 - Rewrote stale docs to the current system: AGENTS.md (Space = raw data, local = reports; verification loop with rescore / Space deploy / headless TUI), DEMO.md (current keys and flow), `.ai/rules/01-03` (pipeline, emotion contract, virality + breakdown, data model, Space API, report surfaces), `.ai/research/` (new `emotion.md`; scoring, hf-space, README updated), `hf_space/README.md`, `hf_space/CLIENT_SNIPPET.md`, ARCHITECTURE.md (face channel, channel trust, why-viral, reports sort, re-analyze, trending script).
 - Promoted the batch re-run script to `tribe/rerun_all.py` (repo-relative paths).
+
+## 2026-10-11 — Optional caption + plain follower ranges
+- Caption: TUI `CaptionPrompt` before every analysis (Enter empty = none, Esc cancels, prefilled with the last caption); multipart field `caption` -> Space `_caption` (CLIP frame sims + gallery sims, multilingual MiniLM transcript vs controls, GoEmotions) -> raw `emotion.caption`; local `tribe/caption.py` decides relevance / verdict / emotion / lift; report `caption` block; web + md + TUI sections; `rerun_all` keeps a report's caption.
+- Validated on CPU with real frames: review true captions relevance 1.0 (+9.7), rajpsych true 0.54 (+3.8); lorem ipsum, "follow for more", borrowed and off-topic captions all 0. Gallery `hf_space/caption_gallery.npy` (55 sample reels x 8 frames, CLIP embeddings only; `tribe/build_caption_gallery.py`).
+- Follower markers `! $ $$ $$$` replaced by plain ranges ("146k views · 200k–1M followers"); reels column 46 wide; reel card adds the size word.
+- Pending: Space deploy after the 45-reel re-run finishes (deploy restarts the container).
+- Deployed (Space commit 87c867c) after stopping the re-run at 27/45 (1 Space job cancelled). GPU check on the product review: borrowed caption -> ignored (frames z 0.53, speech z 0.91, +0); true Hinglish caption -> matches (2.75 / 3.14, relevance 1.0, +9.7, viral 45.3). Same numbers as the CPU test. Caption emotion list drops "calm".

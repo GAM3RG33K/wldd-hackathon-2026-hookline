@@ -438,6 +438,33 @@ def _music_html(r: dict) -> str:
     return f'<p><b>Music</b>: {html.escape(" · ".join(bits))}</p>'
 
 
+def _caption_html(r: dict) -> str:
+    """The creator's caption (only when given): verdict, evidence, emotion it adds, effect on viral potential."""
+    import html
+    import caption as CAP
+    cap = r.get("caption")
+    if not cap:
+        return ""
+    ev = cap.get("evidence") or {}
+    ok = cap.get("relevance", 0) > 0
+    rows = []
+    if ev.get("frames_z") is not None:
+        rows.append(f'<li>Frames: fits this reel better than {ev.get("frames_beats_other_reels", 0):.0%} of other reels '
+                    f'(z {ev["frames_z"]:.1f}; a generic caption fits every reel about equally)</li>')
+    if ev.get("transcript_z") is not None:
+        rows.append(f'<li>Speech: closer to the transcript than {ev.get("transcript_beats_controls", 0):.0%} of unrelated '
+                    f'captions (z {ev["transcript_z"]:.1f})</li>')
+    emo = (cap.get("emotion") or {}).get("top") or []
+    if ok and emo:
+        rows.append("<li>Adds emotional context: " + html.escape(", ".join(f"{e} {p:.0%}" for e, p in emo)) + "</li>")
+    effect = (f'<b>+{cap.get("virality_points", 0):.1f}</b> viral potential (relevance {cap["relevance"]:.2f})'
+              if ok else "no effect: ignored")
+    return (f'<section class=caption><h2>Caption <span class=muted>({html.escape(cap.get("verdict", ""))})</span></h2>'
+            f'<blockquote>{html.escape(cap["text"])}</blockquote>'
+            f'<p>Effect: {effect}. A caption counts from z {CAP.Z_LOW} on frames or speech; full effect at z {CAP.Z_HIGH}.</p>'
+            f'<ul class=muted>{"".join(rows)}</ul></section>')
+
+
 def _virality_html(r: dict) -> str:
     """Why this viral potential: each factor's score, points, and pull vs a typical reel (diverging bar)."""
     import html
@@ -461,8 +488,9 @@ def _virality_html(r: dict) -> str:
                     f'<td>{bar}</td><td class="num {"pos" if d >= 0 else "neg"}">{d:+.1f}</td>'
                     f'<td class=muted>{html.escape(x["explain"])}</td></tr>')
     base = s.get("virality_base")
-    total = (f'{base:.1f} from attention + {s["virality"] - base:.1f} emotional lift = <b>{s["virality"]:.0f}</b>'
-             if base is not None else f'<b>{s["virality"]:.0f}</b>')
+    lifts = [(x["label"].lower(), x["points"]) for x in b if x["key"] in ("emotion_lift", "caption") and x.get("points")]
+    total = (f'{base:.1f} from attention' + "".join(f" + {p:.1f} {lbl}" for lbl, p in lifts) +
+             f' = <b>{s["virality"]:.0f}</b>' if base is not None else f'<b>{s["virality"]:.0f}</b>')
     return (f'<section class=why><h2>Why viral potential {s["virality"]:.0f} '
             f'<span class=muted>({html.escape(s.get("virality_tag", s.get("virality_band", "")))})</span></h2>'
             f'<p>{html.escape(s.get("virality_summary") or "")}</p>'
@@ -691,6 +719,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 .why th{{color:var(--muted);font-weight:500;font-size:.85rem}} .why .num{{text-align:right;white-space:nowrap}}
 .why tr.top td:first-child{{font-weight:700}} .why .pos{{color:var(--hook)}} .why .neg{{color:var(--drop)}}
 .why .wrap{{overflow-x:auto}}
+.caption blockquote{{margin:.4rem 0;padding:.6rem 1rem;border-left:3px solid var(--strong);background:color-mix(in srgb,var(--line) 35%,transparent);border-radius:6px;white-space:pre-wrap}}
 .vbar{{position:relative;display:block;width:160px;height:10px;background:var(--line);border-radius:5px}}
 .vbar::after{{content:"";position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--muted)}}
 .vbar i{{position:absolute;top:0;bottom:0;border-radius:5px}} .vbar i.up{{background:var(--hook)}} .vbar i.down{{background:var(--drop)}}
@@ -706,6 +735,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {tile('Viral potential', f"{s['virality']:.0f}", s.get('virality_tag', s['virality_band']))}
 </div>
 <div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}{_emotion_html(r)}</div></div>
+{_caption_html(r)}
 {_virality_html(r)}
 {_suggestions_html(r, job_id)}
 {_transcript_html(r)}

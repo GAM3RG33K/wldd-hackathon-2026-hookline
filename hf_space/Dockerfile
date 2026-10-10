@@ -67,7 +67,7 @@ RUN mkdir -p /app/models && wget -q -O /app/models/face_detection_yunet_2023mar.
  && python -c "import os; assert os.path.getsize('/app/models/face_detection_yunet_2023mar.onnx') > 100000" \
  && chmod -R a+rX /app/models
 
-COPY tribe_analyze.py hookline_report.py emotion_fusion.py suggest.py audio_music.py taxonomy.py app.py audio_match.py emotion.py trending_audio.json ./
+COPY tribe_analyze.py hookline_report.py emotion_fusion.py suggest.py audio_music.py taxonomy.py caption.py app.py audio_match.py emotion.py trending_audio.json caption_gallery.npy ./
 
 EXPOSE 7860
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]

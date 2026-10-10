@@ -6,7 +6,7 @@
 - **Local:** Python 3.12, `backend/requirements.txt` (FastAPI, uvicorn, textual, scipy, librosa, nilearn, matplotlib …), ffmpeg / ffprobe on PATH. `./run-demo.sh` installs deps once and opens the TUI (which starts the backend).
 
 ## Space API (`hf_space/app.py`)
-- `POST /analyze?video=&audio=&text=auto|on|off&lang=auto|hi|en&asr=hinglish|whisper` (multipart `video`) → `{job_id, estimate_s}`; one GPU job at a time, others queue.
+- `POST /analyze?video=&audio=&text=auto|on|off&lang=auto|hi|en&asr=hinglish|whisper` (multipart `video` + optional form field `caption`, ≤ 2200 chars) → `{job_id, estimate_s}`; one GPU job at a time, others queue.
 - `GET /jobs`, `GET /jobs/{id}` (step, substep, loops, chunk progress, ETA), `POST /jobs/{id}/cancel`, `POST /jobs/{id}/restart` (no re-upload), `GET /jobs/{id}/raw` (zip), `GET /report/{id}` (fallback report), `GET /health` (`boot`: model warm-up status per component).
 - Space control from the TUI uses the Hub API: `GET/POST https://huggingface.co/api/spaces/<repo>/{runtime,restart,pause}`.
 

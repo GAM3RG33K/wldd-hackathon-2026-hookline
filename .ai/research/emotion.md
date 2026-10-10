@@ -20,6 +20,10 @@
 - Same reel, performed crying / rage not detected → face channel; result sorrow 0:28, 1:01, outrage 1:07, product review stays clean. 2026-10-11.
 - Rejected: 2-channel agreement for strong peaks (killed FL041's music-led sorrow); per-reel prompt z-scores (false fear / disgust).
 
+## Caption relevance (2026-10-11)
+- Fixed control captions alone fail on frames: CLIP rewards anything that fits "a person in a reel" ("follow for more #viral #reels" z 2.67; another reel's caption z 2.39). Specificity vs a gallery of other reels separates them: true captions frames z 2.3–3.9, generic / borrowed / unrelated ≤ 1.51. Transcript similarity (multilingual MiniLM) catches Hinglish captions (true z 3.14 vs ≤ 1.05). Rule: stronger z, 0 at 1.6, full at 3.0.
+- Miss: abstract true captions ("betrays you before navratri") — neither test sees betrayal.
+
 ## Open
 - Humour / jokes need semantics (Hinglish-capable LLM over transcript, or a VLM story layer, e.g. Qwen2.5-VL-7B).
 - Prompt calibration activates at ≥ 15 reference reels (`calibrate_prompts.py`); rebuild after the full re-run.
