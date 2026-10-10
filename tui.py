@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
@@ -281,6 +282,7 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   r        jump to a random sample reel
   w        open the selected report in the browser (video + chart + transcript)
   R        open all reports in the browser (live list, refreshes every 5s)
+  g        regenerate the selected report from its raw model output (current formulas)
   v a t    toggle video / audio / transcript for full TRIBE runs
   l        transcription language: auto (Hindi/English/Hinglish) / hi / en
            transcript cycles auto / on / off. auto: a speech gate checks how much of the
@@ -337,6 +339,7 @@ class Hookline(App):
         Binding("r", "random", "Random reel"),
         Binding("w", "web", "Web view"),
         Binding("R", "all_reports", "All reports"),
+        Binding("g", "regenerate", "Regenerate", show=False),
         Binding("x", "stop", "Stop job"),
         Binding("v", "toggle('video')", "Video", show=False),
         Binding("a", "toggle('audio')", "Audio", show=False),
@@ -730,15 +733,15 @@ class Hookline(App):
             if "scores" in r:
                 job = f"s-{sid}"
                 jd = OUT / job
-                jd.mkdir(parents=True, exist_ok=True)
-                r["preview"] = False
-                r["local_video"] = str(Path(d["path"]).resolve())  # web report plays it from disk
-                (jd / "report.json").write_text(json.dumps(r, indent=1))
-                for ext in ("png", "md"):
-                    try:
-                        (jd / f"report.{ext}").write_bytes(http_bytes(f"{SPACE}/report/{sid}.{ext}", tok))
-                    except Exception:
-                        pass
+                try:  # preferred: raw output -> report built locally by the backend
+                    q = urllib.parse.urlencode({"video": str(Path(d["path"]).resolve()), "source_id": d["id"]})
+                    r = http_json(f"{BACKEND}/import/{sid}?{q}", timeout=300, data=b"")["report"]
+                except Exception as e:  # backend down: keep the Space-built report
+                    self.call_from_thread(self.say, f"Local import failed ({e}); using the Space report", "yellow")
+                    jd.mkdir(parents=True, exist_ok=True)
+                    r["preview"] = False
+                    r["local_video"] = str(Path(d["path"]).resolve())
+                    (jd / "report.json").write_text(json.dumps(r, indent=1))
                 self.by_path[d["path"]] = job
                 self.space_run = None
                 el = time.time() - run["t0"]
@@ -997,6 +1000,26 @@ class Hookline(App):
             return
         webbrowser.open(f"{BACKEND}/report/{job}/view")
         self.say(f"Opened {BACKEND}/report/{job}/view")
+
+    def action_regenerate(self):
+        job = getattr(self, "current_job", None)
+        if not job or not (OUT / job / "raw" / "meta.json").exists():
+            self.say("No raw model output stored for this report (only reports built locally can be regenerated).",
+                     "yellow")
+            return
+        self.regenerate(job)
+
+    @work(thread=True, group="regen")
+    def regenerate(self, job):
+        self.call_from_thread(self.say, f"Regenerating {job} from raw model output …")
+        try:
+            r = http_json(f"{BACKEND}/report/{job}/regenerate", timeout=300, data=b"")["report"]
+        except Exception as e:
+            self.call_from_thread(self.say, f"Regenerate failed: {e}", "red")
+            return
+        self.call_from_thread(self.show_report, r, job, r.get("source_id") or job)
+        self.call_from_thread(self.refresh_saved)
+        self.call_from_thread(self.say, f"Regenerated {job} with the current formulas", "green")
 
     def action_all_reports(self):
         webbrowser.open(f"{BACKEND}/reports")

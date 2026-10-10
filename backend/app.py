@@ -246,6 +246,37 @@ def _chart_svg(r: dict) -> str:
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 
 
+@app.post("/import/{space_job}")
+def import_space_job(space_job: str, video: str, source_id: str = ""):
+    """Fetch a finished Space job's raw output and build its report locally (the Space only
+    does GPU work; scoring lives here so formula changes apply instantly)."""
+    import rescore as RS
+    if not Path(video).is_file():
+        return JSONResponse({"error": f"local video not found: {video}"}, status_code=400)
+    try:
+        job_dir = RS.fetch_raw(space_job)
+        report = RS.rescore(job_dir, video, source_id or None)
+    except Exception as e:  # noqa: BLE001 - surfaced to the caller
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=502)
+    return {"job_id": f"s-{space_job}", "report": report}
+
+
+@app.post("/report/{job_id}/regenerate")
+def regenerate(job_id: str, redirect: bool = False):
+    """Rebuild a report from its stored raw model output with the current formulas."""
+    import rescore as RS
+    from fastapi.responses import RedirectResponse
+    if not (OUT / job_id / "raw" / "meta.json").exists():
+        return JSONResponse({"error": "no raw output stored for this report"}, status_code=404)
+    try:
+        report = RS.rescore(OUT / job_id)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    if redirect:
+        return RedirectResponse(f"/report/{job_id}/view", status_code=303)
+    return {"job_id": job_id, "report": report}
+
+
 def _local_video(job_id: str, r: dict):
     """The reel on this machine: the path saved with the report, else the preview job's upload."""
     demo = [TRIBE / "samples" / "sneaker.mp4"] if job_id == "demo" else []  # demo report's source reel
@@ -429,7 +460,9 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 <p class=muted>Viral potential: {html.escape(s.get('virality_method', 'legacy formula'))}.
 Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored within the video).</p>
 <p><i>{html.escape(r['method'])}</i> · neural_source={html.escape(str(r.get('neural_source', '?')))}</p>
-<p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a></p>
+<p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a>
+{f'<form method=post action="/report/{job_id}/regenerate?redirect=true" style="display:inline"> · <button>Regenerate from raw model output</button></form>' if (OUT / job_id / "raw" / "meta.json").exists() else ''}
+{'<span class=muted> · built locally from raw TRIBE output</span>' if r.get("regenerated_locally") else ''}</p>
 <script>
 (() => {{
   const v = document.getElementById("reel"), ph = document.getElementById("playhead");

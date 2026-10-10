@@ -10,6 +10,7 @@
   POST /jobs/{job_id}/restart      -> stop if running, re-run the same upload as a new job
   GET  /jobs                       -> recent jobs, newest first
   GET  /jobs/{job_id}              -> progress, timings, chunks and log (also after done)
+  GET  /jobs/{job_id}/raw          -> zip: preds (float16), times, words.tsv, meta.json (for local re-scoring)
   GET  /health                     -> {ok, device, model_loaded}
 
 Same report.json schema as tribe/hookline_report.py, plus
@@ -383,6 +384,7 @@ def _post_transcript_check(job_id: str, events):
     if bad:
         events = events[events.type != "Word"]
         j["modalities"]["text"] = False
+        j["transcript_words"] = []
         g = j.setdefault("speech_gate", {})
         g["decision"] = "transcript off"
         g["reason"] = (f"transcript not trustworthy ({words} words, avg logprob "
@@ -842,6 +844,7 @@ def _fast_transcript(wav_filename, language):
             JOBS[job_id]["transcript"]["avg_logprob"] = getattr(info, "hl_avg_logprob", None)
         if job_id:
             JOBS[job_id]["transcript_segments"] = _segments(words)
+            JOBS[job_id]["transcript_words"] = words
         return pd.DataFrame(words)
     except Exception as e:  # noqa: BLE001 - fall back, but say exactly why
         msg = f"{type(e).__name__}: {e}"
@@ -1029,52 +1032,42 @@ def _predict(job_id: str, model, events):
             return model.predict(events=events)
 
 
+def _space_extra(job_id):
+    """Everything the local re-scorer needs besides preds/times/words (travels in meta.json)."""
+    jj = JOBS[job_id]
+    am = jj.get("audio_match") or {}
+    return {"neural_source": f"tribev2-full ({DEVICE})",
+            "modalities": jj.get("modalities", DEFAULT_MODALITIES),
+            "speech_gate": jj.get("speech_gate"),
+            "transcript_info": jj.get("transcript"), "transcript_segments": jj.get("transcript_segments"),
+            "transcript_dropped": jj.get("transcript_dropped"),
+            "audio_match": {"song": am.get("song"), "reuse": am.get("reuse", [])},
+            "text_mode": jj.get("text_mode"), "lang": jj.get("lang"), "asr": jj.get("asr")}
+
+
 def _write_outputs(job_id, job, video, source_name, preds, segments):
+    import pandas as pd
     times = np.array([float(getattr(s, "start", i)) for i, s in enumerate(segments)])
     times = times - times.min() if len(times) else times
     np.save(job / "preds.npy", preds)
     np.save(job / "times.npy", times)
-    tsv = video.with_suffix(".tsv")
+    extra = _space_extra(job_id)
+    words = JOBS[job_id].get("transcript_words") or []
+    words_tsv = job / "words.tsv"  # the words the model actually used (post guard / gate)
+    if extra["modalities"].get("text") and words:
+        pd.DataFrame(words).to_csv(words_tsv, sep="\t", index=False)
     (job / "meta.json").write_text(json.dumps({
         "video": str(video), "source": source_name,
-        "transcript": str(tsv) if tsv.exists() else None,
-        "n_steps": int(preds.shape[0]), "space_device": DEVICE,
+        "transcript": str(words_tsv) if words_tsv.exists() else None,
+        "n_steps": int(preds.shape[0]), "space_device": DEVICE, "space_job": job_id,
         "chunk_s": CHUNK_S, "whisper_model": os.environ.get("TRIBE_WHISPER_MODEL", "base"),
         "precision": PRECISION, "keep_gb": KEEP_GB,
-        "modalities": JOBS[job_id].get("modalities", DEFAULT_MODALITIES),
-        "timings": JOBS[job_id].get("substeps", []),
-    }))
+        "modalities": extra["modalities"],
+        "timings": JOBS[job_id].get("substeps", []), "model_loads": JOBS[job_id].get("model_loads", []),
+        "space": extra,
+    }, default=str))
     report, d = HL.analyse(job, video)
-    report["neural_source"] = f"tribev2-full ({DEVICE})"
-    mods = JOBS[job_id].get("modalities", DEFAULT_MODALITIES)
-    report["modalities"] = mods
-    gate = JOBS[job_id].get("speech_gate")
-    if gate:
-        report["speech_gate"] = {k: v for k, v in gate.items() if not k.endswith("_per_second")}
-        report.setdefault("series", {})["speech_prob"] = gate.get("speech_per_second", [])
-        report["series"]["vocals_prob"] = gate.get("vocals_per_second", [])
-    jj = JOBS[job_id]
-    segs = jj.get("transcript_segments")
-    tr_info = jj.get("transcript") or {}
-    report["transcript"] = {
-        "used_by_model": bool(mods.get("text")) and bool(segs),
-        "status": ("used" if mods.get("text") and segs else
-                   f"skipped: {(gate or {}).get('reason', 'transcript off')}" if gate and not mods.get("text") else
-                   "off" if not mods.get("text") else "no speech found"),
-        "model": tr_info.get("model"), "lang": tr_info.get("lang"), "detected": tr_info.get("detected"),
-        "words": tr_info.get("words"), "segments": segs or [],
-        "dropped_by_guard": jj.get("transcript_dropped"),
-    }
-    am = JOBS[job_id].get("audio_match")
-    report["audio"] = {"type": (gate or {}).get("audio_type"), "song": (am or {}).get("song"),
-                       "reused_by": (am or {}).get("reuse", []),
-                       "note": "context only, not a score input"}
-    gated_off = bool(gate) and gate.get("decision") == "transcript off"
-    if gated_off and mods.get("video") and mods.get("audio"):
-        report["method"] += f"; transcript skipped by speech gate ({gate['reason']}), scored on visuals + sound"
-    elif not all(mods.values()):
-        used = "+".join(m for m, on in mods.items() if on)
-        report["method"] += f"; partial modalities ({used}), diagnostic run"
+    HL.finalize(report, extra)
     (job / "report.json").write_text(json.dumps(report, indent=1))
     HL.write_md(report, job / "report.md")
     HL.write_png(report, d, job / "report.png")
@@ -1187,6 +1180,29 @@ def restart_job(job_id: str, background: BackgroundTasks):
                     modalities=dict(j.get("modalities") or DEFAULT_MODALITIES,
                                     text=j.get("text_mode", DEFAULT_TEXT_MODE) != "off"),
                     lang=j.get("lang"), asr=j.get("asr"), text_mode=j.get("text_mode"))
+
+
+@app.get("/jobs/{job_id}/raw")
+def job_raw(job_id: str):
+    """Raw model output for local report generation: preds (float16), times, words, meta.
+    Lives in /tmp: gone after a Space restart, so clients should fetch it right after 'done'."""
+    import io
+    import zipfile
+    from fastapi.responses import Response
+    jd = WORK / job_id
+    if not (jd / "preds.npy").exists():
+        return JSONResponse({"error": "no raw output for this job (not done, or Space restarted)"}, status_code=404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        b = io.BytesIO()
+        np.save(b, np.load(jd / "preds.npy").astype(np.float16))
+        z.writestr("preds.npy", b.getvalue())
+        z.write(jd / "times.npy", "times.npy")
+        z.write(jd / "meta.json", "meta.json")
+        if (jd / "words.tsv").exists():
+            z.write(jd / "words.tsv", "words.tsv")
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename={job_id}-raw.zip"})
 
 
 @app.get("/jobs/{job_id}")

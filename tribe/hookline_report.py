@@ -367,6 +367,41 @@ def analyse(out_dir, video=None):
 
 
 # ---------------------------------------------------------------- output
+def finalize(report, extra):
+    """Merge what the GPU Space knows (modalities, speech gate, transcript, audio match) into a
+    scored report. Shared by the Space and the local re-scorer so both build identical reports."""
+    extra = extra or {}
+    mods = extra.get("modalities") or {"video": True, "audio": True, "text": True}
+    report["neural_source"] = extra.get("neural_source", report.get("neural_source"))
+    report["modalities"] = mods
+    gate = extra.get("speech_gate")
+    if gate:
+        report["speech_gate"] = {k: v for k, v in gate.items() if not k.endswith("_per_second")}
+        report.setdefault("series", {})["speech_prob"] = gate.get("speech_per_second", [])
+        report["series"]["vocals_prob"] = gate.get("vocals_per_second", [])
+    segs = extra.get("transcript_segments")
+    info = extra.get("transcript_info") or {}
+    report["transcript"] = {
+        "used_by_model": bool(mods.get("text")) and bool(segs),
+        "status": ("used" if mods.get("text") and segs else
+                   f"skipped: {(gate or {}).get('reason', 'transcript off')}" if gate and not mods.get("text") else
+                   "off" if not mods.get("text") else "no speech found"),
+        "model": info.get("model"), "lang": info.get("lang"), "detected": info.get("detected"),
+        "words": info.get("words"), "segments": segs or [],
+        "dropped_by_guard": extra.get("transcript_dropped"),
+    }
+    am = extra.get("audio_match") or {}
+    report["audio"] = {"type": (gate or {}).get("audio_type"), "song": am.get("song"),
+                       "reused_by": am.get("reuse", []), "note": "context only, not a score input"}
+    gated_off = bool(gate) and gate.get("decision") == "transcript off"
+    if gated_off and mods.get("video") and mods.get("audio"):
+        report["method"] += f"; transcript skipped by speech gate ({gate['reason']}), scored on visuals + sound"
+    elif not all(mods.values()):
+        used = "+".join(m for m, on in mods.items() if on)
+        report["method"] += f"; partial modalities ({used}), diagnostic run"
+    return report
+
+
 def write_md(r, path):
     s, m = r["scores"], r["moments"]
     lines = [f"# Hookline report", "", f"`{Path(r['video']).name}`, {r['duration_s']}s", "",

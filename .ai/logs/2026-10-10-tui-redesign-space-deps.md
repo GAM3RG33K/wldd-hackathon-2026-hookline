@@ -225,3 +225,17 @@
 - Calibration batch: OL001-OL010 (10M-315M views), then the 10 lowest-view face/faceless reels
   FL019, FC021, FL024, FC046, FC040, FL028, FC037, FC019, FC045, FC039 (2k-12k views), labelled
   [i/20] in one sequential chain.
+
+## Reports built locally from raw TRIBE output
+- The Space now returns raw output at GET /jobs/{id}/raw: a zip of preds (float16, about 2-3 MB
+  for 60s), times, words.tsv (the words the model used) and meta.json (gate, audio match,
+  transcript info, modalities, timings). It lives in /tmp, so it is lost on a Space restart;
+  clients fetch it right after "done".
+- Local: tribe/rescore.py stores it in backend/out/s-<job>/raw/ and builds report.json/md/png
+  against the local video. The backend has POST /import/{space_job}?video=..&source_id=.. and
+  POST /report/{id}/regenerate. The web report has a "Regenerate from raw model output"
+  button; the TUI has `g`. The TUI and batch import through the backend (fallback: the Space report).
+- hookline_report.finalize() holds the merge logic (gate, transcript, audio, method notes)
+  for both the Space and local builds.
+- The calibration chain was stopped at [8/20]. The 7 outlier reports had no raw output, so they
+  were removed and all 20 reels are being re-run, now with raw output stored.
