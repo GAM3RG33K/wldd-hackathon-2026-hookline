@@ -156,6 +156,11 @@ async def analyze(video: UploadFile = File(...), mode: str = "preview"):
         report = run_preview(job, dest, video.filename or dest.name)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    try:  # one report per video: replace older previews of the same upload name
+        import rescore as RS
+        RS.supersede(job)
+    except Exception:  # noqa: BLE001 - never fail the upload over cleanup
+        pass
     return {"job_id": job_id, "preview": True,
             "neural_source": NEURAL_SOURCE, "report": report}
 
@@ -288,6 +293,7 @@ def import_space_job(space_job: str, video: str, source_id: str = ""):
     try:
         job_dir = RS.fetch_raw(space_job)
         report = RS.rescore(job_dir, video, source_id or None)
+        report["replaced"] = RS.supersede(job_dir)  # one report per video
     except Exception as e:  # noqa: BLE001 - surfaced to the caller
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=502)
     return {"job_id": f"s-{space_job}", "report": report}

@@ -84,6 +84,55 @@ def rescore(job_dir, video=None, source_id=None):
     return report
 
 
+def _video_key(report):
+    """Identity of the reel: its local file, or for web uploads (copied to <job>/input.*) its name."""
+    v = report.get("local_video")
+    if not v:
+        return None
+    if Path(v).stem == "input" and Path(v).parent.parent.resolve() == OUT.resolve():
+        return f"upload:{report.get('source_id') or Path(v).parent.name}"
+    try:
+        return str(Path(v).resolve())
+    except OSError:
+        return None
+
+
+def _is_full(report):
+    return report.get("preview") is False or "full" in str(report.get("neural_source", ""))
+
+
+def supersede(job_dir, out=OUT, log=print):
+    """One report per video: move older reports of the same video to out/.replaced/.
+    A full TRIBE report replaces older full reports and previews; a preview only replaces
+    older previews (it never deletes a full report). Returns the removed folder names."""
+    import shutil
+    job_dir = Path(job_dir)
+    new = json.loads((job_dir / "report.json").read_text())
+    key, full = _video_key(new), _is_full(new)
+    if not key:
+        return []
+    removed = []
+    for rp in out.glob("*/report.json"):
+        d = rp.parent
+        if d.resolve() == job_dir.resolve() or d.name == "demo":
+            continue
+        try:
+            old = json.loads(rp.read_text())
+        except Exception:  # noqa: BLE001 - unreadable report: leave it alone
+            continue
+        if _video_key(old) != key or (_is_full(old) and not full):
+            continue
+        archive = out / ".replaced"  # out of every listing; recoverable until purged
+        archive.mkdir(exist_ok=True)
+        if (archive / d.name).exists():
+            shutil.rmtree(archive / d.name)
+        shutil.move(str(d), str(archive / d.name))
+        removed.append(d.name)
+    if removed:
+        log(f"replaced older report(s) of {Path(key).name}: {', '.join(removed)}")
+    return removed
+
+
 def importlib_reload(mod):
     import importlib
     try:
