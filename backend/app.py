@@ -69,6 +69,8 @@ def run_preview(job: Path, video: Path, source_name: str) -> dict:
     report, d = HL.analyse(job, video)
     report["preview"] = True
     report["neural_source"] = NEURAL_SOURCE
+    report["source_id"] = Path(source_name).stem  # list reports by the uploaded file's name
+    report["local_video"] = str(video.resolve())
     (job / "report.json").write_text(json.dumps(report, indent=1))
     HL.write_md(report, job / "report.md")
     HL.write_png(report, d, job / "report.png")
@@ -246,6 +248,16 @@ def _chart_svg(r: dict) -> str:
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 
 
+def report_name(r: dict, job: str):
+    """Name a report is listed under: its video file's name. None = not listed (video gone,
+    or no real file name, e.g. old uploads stored as input.mp4 or the built-in demo)."""
+    video = r.get("local_video")
+    if job == "demo" or not video or not Path(video).is_file():
+        return None
+    name = r.get("source_id") or Path(video).stem
+    return None if name in ("input", job) else name
+
+
 @app.post("/import/{space_job}")
 def import_space_job(space_job: str, video: str, source_id: str = ""):
     """Fetch a finished Space job's raw output and build its report locally (the Space only
@@ -330,11 +342,13 @@ def list_reports(sort: str = "viral"):
         except Exception:
             continue
         job = p.parent.name
-        name = r.get("source_id") or Path(r.get("local_video") or "").stem or job
+        name = report_name(r, job)
+        if name is None:
+            continue
         full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
         audio = (r.get("audio") or {}).get("type") or "-"
         song = (r.get("audio") or {}).get("song")
-        rows.append((s["virality"], p.stat().st_mtime, f'<tr><td><a href="/report/{job}/view">{html.escape(name if name != "input" else job)}</a></td>'
+        rows.append((s["virality"], p.stat().st_mtime, f'<tr><td><a href="/report/{job}/view">{html.escape(name)}</a></td>'
                     f'<td>{"full TRIBE" if full else "preview"}</td>'
                     f'<td><b>{s["virality"]:.0f}</b> {html.escape(s.get("virality_tag", s.get("virality_band", "")))}</td>'
                     f'<td>{s["hook_pct"]:.0f}</td><td>{s["hold_rate_pct"]:.0f}%</td><td>{s["finish_pct"]:.0f}%</td>'

@@ -448,9 +448,11 @@ class Hookline(App):
             try:
                 r = json.loads(p.read_text())
                 s = r["scores"]
-                name = r.get("source_id") or Path(r.get("local_video") or p.parent.name).stem
-                if name == "input":
-                    name = p.parent.name
+                video = r.get("local_video")
+                name = r.get("source_id") or (Path(video).stem if video else None)
+                # list only reports whose video still exists and that are named after it
+                if not video or not Path(video).is_file() or name in (None, "input", p.parent.name):
+                    continue
                 label = Text(f"{name:<7}")
                 tag = s.get("virality_tag") or s.get("virality_band", "")
                 label.append(f"{s['virality']:>3.0f} {tag}", BAND_STYLE.get(tag, "dim"))
