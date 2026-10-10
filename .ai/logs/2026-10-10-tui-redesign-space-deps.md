@@ -173,3 +173,30 @@
   (hook 47/46, virality 38/35), while FC032 (567k) and FC023 (56k) scored hook 88. The scores are
   within-video normalised and uncalibrated, so they are not comparable across reels. Even so, there
   is no positive relation in this sample. The CFG fit against views (research/scoring-heuristic.md) is needed before any claim.
+
+## Hinglish ASR, speech gate, audio type + trending song match
+- ASR is pluggable (`asr=hinglish|whisper`, `lang=auto|hi|en`). Default is
+  Oriserve/Whisper-Hindi2Hinglish-Apex (Apache-2.0, large-v3-turbo fine-tune), converted to
+  CTranslate2 at startup (13s). A/B: FL034 Hinglish kept as spoken ("To main thik karta hoon na
+  tumko"), whereas stock Whisper translated it to English. It hallucinated "nan nan ..." on a
+  song (FC032), so guards were added: compression ratio > 2.4, no-speech, segments with < 30%
+  distinct words, repeated and glued tokens.
+- Gemini as ASR was discussed and not built: it has no reliable word timestamps (it would need
+  MMS forced alignment), and it sends audio to a third party.
+- Speech gate (`text=auto`, default): AST AudioSet classifier (MIT/ast-finetuned-audioset-10-10-0.4593)
+  on 2s windows with a 1s hop. Per-second groups: speech, vocals (song/singing/rap), music,
+  music bed, Indian (Bollywood/Carnatic), humming, laughter. Audio type: song / speech_over_music
+  / speech / instrumental / humming / other. Transcription runs only for speech types; after
+  that, transcript confidence can still drop it. FC023 (14% speech over music) was wrongly
+  gated at a 20% threshold; it is now speech_over_music, so the transcript stays on.
+- Song match (report context only): Chromaprint fpcalc fingerprints against
+  hf_space/trending_audio.json (11 iTunes previews: CreatorDB global list for the week of
+  2026-10-07, plus 2 India picks marked unverified). Every analysed reel's fingerprint is also
+  indexed, so audio reused across reels is flagged. No reel audio leaves the Space. Synthetic
+  test: similarity 0.81 for a shifted copy with ~12% bit noise vs 0.53 for unrelated audio;
+  match threshold 0.65.
+- Report: the `audio` block (type, song, reused_by), `transcript` (used_by_model, status,
+  timestamped segments), and `series.speech_prob` / `series.vocals_prob`. Web view: local video
+  player (`local_video` saved by the TUI and batch, served at /report/{id}/video) next to the
+  chart, with a playhead synced to playback; a transcript section with clickable timestamps;
+  and an audio line. TUI: an audio line under the moments, and the transcript under "What to change".

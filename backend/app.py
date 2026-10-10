@@ -225,6 +225,7 @@ def _chart_svg(r: dict) -> str:
     <div class="yax"><span style="top:0">100</span><span style="top:50%">50</span><span style="top:100%">0</span></div>
     <svg viewBox="0 0 {T} 100" preserveAspectRatio="none" role="img"><title>{title}</title>{''.join(parts)}</svg>
     <div class="peaklbl">{peak_lbl}</div>
+    <div class="playhead" id="playhead" hidden></div>
   </div>
   <div class="xax">{ticks}</div>
   <figcaption>
@@ -236,6 +237,48 @@ def _chart_svg(r: dict) -> str:
     <span><i class="sw cut"></i>scene cut</span>
   </figcaption>
 </figure>"""
+
+
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
+
+
+def _local_video(job_id: str, r: dict):
+    """The reel on this machine: the path saved with the report, else the preview job's upload."""
+    for cand in (r.get("local_video"), *(OUT / job_id).glob("input.*")):
+        if cand and Path(cand).is_file() and Path(cand).suffix.lower() in VIDEO_EXT:
+            return Path(cand)
+    return None
+
+
+@app.get("/report/{job_id}/video")
+def report_video(job_id: str):
+    p = OUT / job_id / "report.json"
+    if not p.exists():
+        return JSONResponse({"error": "unknown job"}, status_code=404)
+    v = _local_video(job_id, json.loads(p.read_text()))
+    if v is None:
+        return JSONResponse({"error": "local video not found"}, status_code=404)
+    return FileResponse(v, media_type="video/mp4")
+
+
+def _transcript_html(r: dict) -> str:
+    import html
+    tr = r.get("transcript")
+    if not isinstance(tr, dict) or ("segments" not in tr and "status" not in tr):
+        return ""
+    head = (f'<h2>Transcript {"used for judging" if tr.get("used_by_model") else "(not used for judging)"}</h2>'
+            f'<p class=muted>{html.escape(str(tr.get("status", "")))}'
+            f'{" · " + html.escape(str(tr.get("model"))) if tr.get("model") else ""}'
+            f'{" · detected " + html.escape(str(tr.get("detected"))) if tr.get("detected") else ""}'
+            f'{" · " + str(tr.get("words")) + " words" if tr.get("words") is not None else ""}'
+            f'{" · guard dropped " + html.escape(str(tr.get("dropped_by_guard"))) if tr.get("dropped_by_guard") else ""}'
+            f'</p>')
+    segs = tr.get("segments") or []
+    if not segs:
+        return head
+    rows = "".join(f'<li><a class=ts href="#" data-t="{s["start"]}">{_fmt_t(s["start"])}</a> '
+                   f'{html.escape(s["text"])}</li>' for s in segs)
+    return head + f'<ul class=transcript>{rows}</ul>'
 
 
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
@@ -254,6 +297,29 @@ def view_report(job_id: str):
     png = OUT / job_id / "report.png"
     png_html = (f'<details><summary>Full chart (PNG)</summary><img src="/report/{job_id}.png" alt="chart"></details>'
                 if _is_png(png) else "")
+    gate = r.get("speech_gate")
+    audio = r.get("audio") or {}
+    gate_html = ""
+    if gate:
+        kinds = {"song": "Song", "speech_over_music": "Speech over music", "speech": "Speech",
+                 "instrumental": "Instrumental music", "humming": "Humming / chant", "other": "No clear speech"}
+        rt = gate.get("ratios", {})
+        mix = " · ".join(f"{k} {v:.0%}" for k, v in rt.items() if k != "silence" and v)
+        song = audio.get("song")
+        song_html = (f' · <b class=song>&#9834; {html.escape(song["title"])} - {html.escape(song["artist"])}</b> '
+                     f'<span class=muted>(on trending list: {html.escape(song.get("list", ""))}, '
+                     f'match {song.get("similarity", 0):.2f})</span>' if song else
+                     ' · <span class=muted>no match in trending catalog</span>')
+        reuse = audio.get("reused_by") or []
+        reuse_html = f" · same audio in {len(reuse)} other analysed reel(s)" if reuse else ""
+        gate_html = (f'<p><b>Audio: {kinds.get(gate.get("audio_type"), "not classified (older report)")}</b>{song_html}{reuse_html}</p>'
+                     f'<p class=muted>{html.escape(mix or "no audio detected")} · '
+                     f'<b>{html.escape(gate.get("decision", ""))}</b> ({html.escape(gate.get("reason", ""))}) · '
+                     f'song/trend info is context only, not a score input</p>')
+    vid = _local_video(job_id, r)
+    video_html = (f'<div class=player><video id=reel controls preload=metadata src="/report/{job_id}/video"></video>'
+                  f'<p class=muted>Local file: <code>{html.escape(str(vid))}</code></p></div>' if vid else
+                  '<p class=muted>Local video not found on this machine.</p>')
     mods = r.get("modalities")
     mods_txt = (" · modalities: " + ", ".join(k for k, v in mods.items() if v)) if mods else ""
     recs = "".join(f"<li><b>{html.escape(x['at'])}</b> {html.escape(x['issue'])}. {html.escape(x['fix'])}</li>"
@@ -266,7 +332,7 @@ def view_report(job_id: str):
 :root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#ea8a0c;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#f5a524}}}}
 body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
-a{{color:var(--att)}}
+a{{color:var(--att)}} .song{{color:var(--strong)}}
 h1 span{{color:var(--muted);font-weight:500}} .muted{{color:var(--muted)}}
 .tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:1rem 0}}
 .tile{{border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}}
@@ -290,21 +356,42 @@ figcaption{{display:flex;flex-wrap:wrap;gap:14px;font-size:.8rem;color:var(--mut
 .sw.drop{{background:var(--drop);opacity:.4}} .sw.strong{{background:var(--strong);opacity:.35}}
 .sw.cut{{border-left:2px dashed var(--muted);border-radius:0;width:0}}
 details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;margin-top:.5rem}}
+.media{{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:20px;align-items:start}}
+.player video{{width:100%;max-height:60vh;border-radius:12px;background:#000}}
+.player code{{font-size:.7rem;word-break:break-all}}
+.playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
+ul.transcript{{list-style:none;padding:0;columns:2;column-gap:24px}} ul.transcript li{{break-inside:avoid;margin:.2rem 0}}
+a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
+@media (max-width:800px){{.media{{grid-template-columns:1fr}} ul.transcript{{columns:1}}}}
 @media (max-width:640px){{.tiles{{grid-template-columns:repeat(2,1fr)}}}}
 </style>
 <h1>Hookline report <span>{job_id} ({mode})</span></h1>
 <p class=muted>{html.escape(Path(r.get('video', '')).name)} · {r.get('duration_s', '?')}s{mods_txt}</p>
+{gate_html}
 <div class="tiles">
 {tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
 {tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}
 {tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
 {tile('Virality', f"{s['virality']:.0f}", s['virality_band'])}
 </div>
-{_chart_svg(r)}
+<div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}</div></div>
+{_transcript_html(r)}
 <h2>What to change</h2><ul>{recs}</ul>
 {png_html}
 <p><i>{html.escape(r['method'])}</i> · neural_source={html.escape(str(r.get('neural_source', '?')))}</p>
-<p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a></p>"""
+<p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a></p>
+<script>
+(() => {{
+  const v = document.getElementById("reel"), ph = document.getElementById("playhead");
+  const T = {len((r.get("series") or {}).get("attention") or []) or 1};
+  if (v && ph) v.addEventListener("timeupdate", () => {{
+    ph.hidden = false; ph.style.left = Math.min(100, 100 * v.currentTime / T) + "%";
+  }});
+  document.querySelectorAll("a.ts").forEach(a => a.addEventListener("click", e => {{
+    e.preventDefault(); if (v) {{ v.currentTime = +a.dataset.t; v.play(); }}
+  }}));
+}})();
+</script>"""
 
 
 @app.post("/jobs/colab")

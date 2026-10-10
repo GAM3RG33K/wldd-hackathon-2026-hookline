@@ -32,9 +32,11 @@ RUN pip install --no-cache-dir -q -r requirements.txt \
  && python -c "import torch, torchaudio, torchvision; import transformers; from transformers import AutoModel; print('torch', torch.__version__, '| ta', torchaudio.__version__, '| tv', torchvision.__version__, '| transformers', transformers.__version__)"
 
 # Runtime tuning, kept below the pip layers so changing it doesn't reinstall torch.
-# Whisper base: ~3x faster than small, multilingual (reels may be Hindi/Hinglish).
+# Whisper large-v3-turbo, multilingual with auto language detection: reels are Hindi,
+# English or Hinglish. Fast enough on a100-large (in-process faster-whisper).
 # 10s chunks + expandable segments: fixes the T4 OOM on a 28s reel.
-ENV TRIBE_WHISPER_MODEL=base \
+ENV TRIBE_WHISPER_MODEL=large-v3-turbo \
+    HOOKLINE_LANG=auto \
     HOOKLINE_CHUNK_S=10 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -55,7 +57,10 @@ RUN mkdir -p /tmp/home /tmp/hf /tmp/cache /tmp/torch && chmod -R a+rwX /tmp \
  && mkdir -p /app/cache && chmod -R a+rwX /app \
  && python -m spacy download en_core_web_lg -q
 
-COPY tribe_analyze.py hookline_report.py app.py ./
+# Chromaprint fpcalc (a few MB) for song identification against the trending catalog.
+RUN apt-get update -qq && apt-get install -y -qq libchromaprint-tools > /dev/null && rm -rf /var/lib/apt/lists/*
+
+COPY tribe_analyze.py hookline_report.py app.py audio_match.py trending_audio.json ./
 
 EXPOSE 7860
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]

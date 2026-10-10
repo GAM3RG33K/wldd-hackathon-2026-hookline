@@ -55,7 +55,30 @@ AFTER_VIDEO_S = 30.0  # loaders + inference after the last video chunk (rough)
 # audio ~0.3s per video second; transcription ~3.5s per video second in events).
 MODALITY_COST = {"video": 8.0, "text": 2.5, "audio": 0.3}
 TRANSCRIBE_COST = 3.5
-DEFAULT_MODALITIES = {"video": True, "audio": True, "text": False}
+DEFAULT_MODALITIES = {"video": True, "audio": True, "text": True}
+# Transcript mode: auto = the speech gate decides per reel (humming/music/song reels are
+# scored on what is seen and heard, not on a transcript); on/off force it.
+TEXT_MODES = {"auto", "on", "off"}
+DEFAULT_TEXT_MODE = os.environ.get("HOOKLINE_TEXT", "auto")
+AST_REPO = "MIT/ast-finetuned-audioset-10-10-0.4593"  # AudioSet classifier for the speech gate
+# Below SPEECH_SKIP_RATIO speech the transcript is skipped outright; above it, Whisper runs and
+# transcript confidence decides (FC023: 14% speech over music, but ~17 clear words).
+SPEECH_MIN_RATIO = float(os.environ.get("HOOKLINE_SPEECH_MIN", "0.05"))  # share of seconds with speech
+GATE_P = 0.4  # per-second class probability threshold
+# AudioSet labels grouped into what matters for a reel's audio.
+AUDIO_GROUPS = {
+    "speech": ["Speech", "Male speech, man speaking", "Female speech, woman speaking", "Child speech, kid speaking",
+               "Conversation", "Narration, monologue"],
+    "vocals": ["Song", "Singing", "Male singing", "Female singing", "Child singing", "Vocal music", "Rapping",
+               "Choir", "A capella"],
+    "music": ["Music"],
+    "bed": ["Background music", "Theme music", "Soundtrack music"],
+    "indian": ["Music of Bollywood", "Carnatic music", "Music of Asia"],
+    "humming": ["Humming", "Chant", "Mantra"],
+    "laughter": ["Laughter"],
+    "silence": ["Silence"],
+}
+_AST = {}
 SCALE = {k: 1.0 for k, *_ in STEPS}
 LOG_TAIL = 60
 HEARTBEAT_S = 20
@@ -191,7 +214,7 @@ def progress(job_id: str) -> dict:
     """Public progress view: current step, elapsed, ETA, timeout, recent log lines."""
     job = JOBS[job_id]
     now = time.time()
-    out = {k: job[k] for k in ("status", "stage", "stage_label", "step", "steps", "video_s", "modalities",
+    out = {k: job[k] for k in ("status", "stage", "stage_label", "step", "steps", "video_s", "modalities", "lang", "asr", "text_mode",
                                "error", "trace", "log", "took") if k in job}
     if "started" in job:
         out["elapsed_s"] = round(now - job["started"])
@@ -208,6 +231,8 @@ def progress(job_id: str) -> dict:
     out["plan"] = [{"key": k, "label": label,
                     "est_s": round(job.get("plan", {}).get(k, _estimate(k, job["video_s"], job.get("modalities")))),
                     "took_s": job.get("took", {}).get(k)} for k, label, *_ in STEPS]
+    if job.get("speech_gate"):
+        out["speech_gate"] = {k: v for k, v in job["speech_gate"].items() if not k.endswith("_per_second")}
     sub = job.get("substep")
     if sub:
         out["substep"] = {"name": sub["name"], "elapsed_s": round(now - sub["started"])}
@@ -219,6 +244,9 @@ def progress(job_id: str) -> dict:
     out["heartbeat"] = job.get("heartbeat")
     out["transcript"] = job.get("transcript")
     out["model_loads"] = job.get("model_loads", [])
+    am = job.get("audio_match")
+    if am:
+        out["audio_match"] = {"song": am.get("song"), "reuse": am.get("reuse", [])}
     out["mem"] = _mem()
     return out
 
@@ -243,6 +271,124 @@ def timed(step: str, name: str):
             j.setdefault("substeps", []).append({"step": step, "name": name, "took_s": round(took, 1)})
             j["substep"] = None
             jlog(job_id, f"  < {step}/{name} {took:.1f}s, mem {_mem()}")
+
+
+def _load_audio(path, sr=16000):
+    import subprocess
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vn", "-f", "f32le",
+                          "-ac", "1", "-ar", str(sr), "-"], capture_output=True).stdout
+    return np.frombuffer(raw, dtype=np.float32)
+
+
+def speech_gate(job_id: str, video) -> dict:
+    """Per-second AudioSet labels (2s windows, 1s hop): how much of the reel is speech vs
+    singing / humming / music / laughter. In auto mode, too little speech turns the
+    transcript off so song/humming reels are scored on visuals + sound."""
+    from transformers import ASTFeatureExtractor, ASTForAudioClassification
+    j = JOBS[job_id]
+    if "model" not in _AST:
+        t0 = time.time()
+        _AST["fe"] = ASTFeatureExtractor.from_pretrained(AST_REPO)
+        m = ASTForAudioClassification.from_pretrained(AST_REPO, torch_dtype=torch.float32).eval()
+        _AST["model"] = m.to(DEVICE)
+        jlog(job_id, f"  loaded AST AudioSet classifier in {time.time() - t0:.1f}s")
+    fe, model = _AST["fe"], _AST["model"]
+    labels = model.config.label2id
+    sr = 16000
+    audio = _load_audio(video, sr)
+    n = int(np.ceil(len(audio) / sr)) if len(audio) else 0
+    names = sorted({c for grp in AUDIO_GROUPS.values() for c in grp if c in labels})
+    probs = np.zeros((n, len(names)), dtype=np.float32)
+    for b0 in range(0, n, 16):
+        chunks = [audio[i * sr:(i + 2) * sr] for i in range(b0, min(n, b0 + 16))]
+        chunks = [c if len(c) >= sr // 2 else np.pad(c, (0, sr // 2 - len(c))) for c in chunks]
+        x = fe(chunks, sampling_rate=sr, return_tensors="pt")["input_values"].to(DEVICE)
+        with torch.inference_mode(), _autocast():
+            p = torch.sigmoid(model(x).logits.float()).cpu().numpy()
+        probs[b0:b0 + len(chunks)] = p[:, [labels[c] for c in names]]
+    col = {c: probs[:, i] for i, c in enumerate(names)}
+    zero = np.zeros(n)
+    grp = {g: np.max([col[c] for c in members if c in col], axis=0) if any(c in col for c in members) else zero
+           for g, members in AUDIO_GROUPS.items()}
+    speech_sec = (grp["speech"] > GATE_P) & (grp["speech"] >= grp["vocals"])
+    vocal_sec = (grp["vocals"] > GATE_P) & (grp["vocals"] > grp["speech"])
+    frac = lambda m: round(float(m.mean()), 2) if n else 0.0
+    ratio = {"speech": frac(speech_sec), "vocals": frac(vocal_sec),
+             **{g: frac(grp[g] > GATE_P) for g in ("music", "bed", "indian", "humming", "laughter", "silence")}}
+    atype = audio_type(ratio)
+    mode = j.get("text_mode", DEFAULT_TEXT_MODE)
+    keep = atype in ("speech", "speech_over_music")
+    why = {"song": f"audio is a song (vocals {ratio['vocals']:.0%}, speech {ratio['speech']:.0%}); lyrics are not "
+                   "the creator's words",
+           "instrumental": f"instrumental music, no speech ({ratio['music']:.0%} music)",
+           "humming": f"humming/chant, no speech ({ratio['humming']:.0%})",
+           "other": f"no clear speech ({ratio['speech']:.0%})",
+           "speech": f"speech in {ratio['speech']:.0%} of the reel",
+           "speech_over_music": f"speech in {ratio['speech']:.0%} of the reel over a music bed"}[atype]
+    if mode == "auto":
+        decision = "transcript on" if keep else "transcript off"
+    else:
+        decision = f"transcript {mode} (forced)"
+    gate = {"mode": mode, "decision": decision, "reason": why, "audio_type": atype, "ratios": ratio, "seconds": n,
+            "speech_per_second": [round(float(v), 2) for v in grp["speech"]],
+            "vocals_per_second": [round(float(v), 2) for v in grp["vocals"]]}
+    j["speech_gate"] = gate
+    if mode == "auto" and not keep:
+        j["modalities"]["text"] = False
+    jlog(job_id, f"  audio: {atype}; {decision} ({why}); ratios {ratio}")
+    return gate
+
+
+def audio_type(r: dict) -> str:
+    """Classify the reel's audio from per-second AudioSet shares."""
+    if r["vocals"] >= 0.4 and r["speech"] < 0.2:
+        return "song"
+    if r["speech"] >= SPEECH_MIN_RATIO:
+        return "speech_over_music" if r["music"] >= 0.3 or r["bed"] >= 0.3 else "speech"
+    if r["humming"] >= 0.2:
+        return "humming"
+    if r["music"] >= 0.4:
+        return "instrumental"
+    return "other"
+
+
+def song_lookup(job_id: str, video, source: str):
+    """Which song is it, is it on the trending list, and have other analysed reels used it?"""
+    import audio_match as AM
+    j = JOBS[job_id]
+    atype = (j.get("speech_gate") or {}).get("audio_type", "unknown")
+    res = AM.identify(video, job_id, source, atype, log=lambda m: jlog(job_id, f"  {m}"))
+    j["audio_match"] = res
+    song = res.get("song")
+    if song:
+        jlog(job_id, f"  song match: {song['title']} - {song['artist']} (trending list: {song['list']}, "
+                     f"similarity {song['similarity']}, at {song['offset_s']}s)")
+    else:
+        jlog(job_id, f"  song match: none in trending catalog ({AM.STATE['status']})")
+    if res.get("reuse"):
+        jlog(job_id, f"  same audio as {len(res['reuse'])} earlier reel(s): "
+                     f"{', '.join(r['source'] for r in res['reuse'][:5])}")
+    return res
+
+
+def _post_transcript_check(job_id: str, events):
+    """Auto mode: drop a transcript that is too thin or low-confidence to trust."""
+    j = JOBS.get(job_id, {})
+    if j.get("text_mode", DEFAULT_TEXT_MODE) != "auto":
+        return events, False
+    tr = j.get("transcript") or {}
+    words = int((events.type == "Word").sum())
+    lp = tr.get("avg_logprob")
+    bad = words < 3 or (lp is not None and lp < -1.0)
+    if bad:
+        events = events[events.type != "Word"]
+        j["modalities"]["text"] = False
+        g = j.setdefault("speech_gate", {})
+        g["decision"] = "transcript off"
+        g["reason"] = (f"transcript not trustworthy ({words} words, avg logprob "
+                       f"{lp if lp is None else round(lp, 2)})")
+        jlog(job_id, f"  speech gate: {g['decision']} after transcription ({g['reason']})")
+    return events, bad
 
 
 def _timed_audio_text_events(events, audio_only: bool = False):
@@ -271,9 +417,15 @@ def _timed_audio_text_events(events, audio_only: bool = False):
         ("chunk_video", du.ChunkEvents(event_type_to_chunk="Video", max_duration=CHUNK_S, min_duration=CHUNK_S / 2)),
     ]
     events = du.standardize_events(events)
+    text_steps = {"add_text", "sentences", "word_context", "remove_missing"}
+    skip_text = False
     for name, t in transforms:
+        if skip_text and name in text_steps:
+            continue
         with timed("events", name):
             events = t(events)
+        if name == "transcribe" and CURRENT["job"]:
+            events, skip_text = _post_transcript_check(CURRENT["job"], events)
         if name == "chunk_video":
             _publish_chunks(events)
     return du.standardize_events(events)
@@ -407,15 +559,18 @@ def _publish_chunks(events):
             jlog(job_id, f"  {kind.lower()} split into {len(spans)} chunks: {', '.join(spans)}")
 
 
-def transcript_done(model: str, device: str, audio_s: float, took: float, n_words: int = -1):
+def transcript_done(model: str, device: str, audio_s: float, took: float, n_words: int = -1,
+                    lang: str = "", detected: str = "", sample: str = ""):
     """Called by the in-process transcription (proves the fast path ran)."""
     job_id = CURRENT["job"]
-    msg = f"whisper {model} on {device}: {audio_s:.1f}s audio -> {n_words} words in {took:.1f}s"
+    msg = (f"whisper {model} on {device} (lang {lang}, detected {detected}): {audio_s:.1f}s audio -> "
+           f"{n_words} words in {took:.1f}s; sample: {sample[:120]!r}")
     print(f"[space] {job_id} {msg}", flush=True)
     if job_id:
         jlog(job_id, f"  {msg}")
         JOBS[job_id]["transcript"] = {"path": "faster-whisper", "model": model, "device": device,
-                                      "audio_s": round(audio_s, 1), "words": n_words, "took_s": round(took, 1)}
+                                      "audio_s": round(audio_s, 1), "words": n_words, "took_s": round(took, 1),
+                                      "lang": lang, "detected": detected, "sample": sample}
 
 
 def _install_speed_hooks():
@@ -563,8 +718,49 @@ def _heartbeat(job_id: str, stop: threading.Event):
 
 
 _FW = {}  # faster-whisper models by name, loaded once per process
+REPEAT_TOKEN = __import__("re").compile(r"^(.{1,4})\1{2,}$")  # short unit repeated 3+ times
 _ORIG_TRANSCRIPT = None
 WHISPER_CODES = dict(english="en", french="fr", spanish="es", dutch="nl", chinese="zh")
+# Reels are Hindi, English or Hinglish. Whisper runs multilingual with per-window language
+# detection unless a job pins one. tribev2 still labels Word events "english": that label only
+# picks the spaCy sentence model (no Hindi pipeline exists), not the transcription language.
+DEFAULT_LANG = os.environ.get("HOOKLINE_LANG", "auto")  # auto | hi | en
+LANGS = {"auto", "hi", "en"}
+# ASR backends. hinglish = Oriserve/Whisper-Hindi2Hinglish-Apex (Apache-2.0, large-v3-turbo
+# fine-tune, Roman-script Hinglish), converted once per container to CTranslate2 so
+# faster-whisper gives word timestamps. whisper = stock multilingual model (Devanagari for Hindi).
+DEFAULT_ASR = os.environ.get("HOOKLINE_ASR", "hinglish")
+ASRS = {"hinglish", "whisper"}
+HINGLISH_REPO = "Oriserve/Whisper-Hindi2Hinglish-Apex"
+HINGLISH_DIR = Path(os.environ.get("HOOKLINE_ASR_DIR", "/tmp/asr")) / "hinglish-apex-ct2"
+_CONVERT_LOCK = threading.Lock()
+
+
+def ensure_hinglish_model() -> str:
+    """Convert the Hinglish model to CTranslate2 once (about 1-2 min), return its path."""
+    import subprocess
+    with _CONVERT_LOCK:
+        if (HINGLISH_DIR / "model.bin").exists():
+            return str(HINGLISH_DIR)
+        HINGLISH_DIR.parent.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        cmd = ["ct2-transformers-converter", "--model", HINGLISH_REPO, "--output_dir", str(HINGLISH_DIR),
+               "--quantization", "float16", "--copy_files", "tokenizer.json", "preprocessor_config.json",
+               "--force"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not (HINGLISH_DIR / "model.bin").exists():
+            raise RuntimeError(f"hinglish conversion failed: {(r.stderr or r.stdout)[-400:]}")
+        BOOT["hinglish_asr"] = f"ready ({time.time() - t0:.0f}s convert)"
+        print(f"[space] {HINGLISH_REPO} converted in {time.time() - t0:.0f}s", flush=True)
+        return str(HINGLISH_DIR)
+
+
+def _warm_hinglish():
+    try:
+        BOOT["hinglish_asr"] = "converting"
+        ensure_hinglish_model()
+    except Exception as e:  # noqa: BLE001 - jobs fall back to whisper and log why
+        BOOT["hinglish_asr"] = f"FAILED {e}"[:300]
 
 
 def _fast_transcript(wav_filename, language):
@@ -574,7 +770,16 @@ def _fast_transcript(wav_filename, language):
     import pandas as pd
     import subprocess
     job_id = CURRENT["job"]
-    name = os.environ.get("TRIBE_WHISPER_MODEL", "base")
+    lang = JOBS.get(job_id or "", {}).get("lang", DEFAULT_LANG)
+    asr = JOBS.get(job_id or "", {}).get("asr", DEFAULT_ASR)
+    name = os.environ.get("TRIBE_WHISPER_MODEL", "large-v3-turbo")
+    if asr == "hinglish":
+        try:
+            name = ensure_hinglish_model()
+        except Exception as e:  # noqa: BLE001 - say why, use stock whisper
+            asr = "whisper"
+            if job_id:
+                jlog(job_id, f"  hinglish ASR unavailable ({str(e)[:200]}); using {name}")
     try:
         from faster_whisper import WhisperModel
         dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -587,15 +792,56 @@ def _fast_transcript(wav_filename, language):
         raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(wav_filename), "-f", "f32le",
                               "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout
         audio = np.frombuffer(raw, dtype=np.float32)
-        segs, _ = _FW[name].transcribe(audio, language=WHISPER_CODES.get(language, "en"),
-                                       word_timestamps=True, beam_size=1, vad_filter=True)
-        words = []
-        for i, seg in enumerate(segs):  # generator: decoding happens while iterating
-            for w in (seg.words or []):
-                words.append({"text": w.word.replace('"', "").strip(), "start": w.start,
-                              "duration": w.end - w.start, "sequence_id": i,
-                              "sentence": seg.text.replace('"', "")})
-        transcript_done(name, dev, len(audio) / 16000, time.time() - t0, len(words))
+        def run(vad):
+            segs, info = _FW[name].transcribe(
+                audio, language=None if lang == "auto" else lang, multilingual=lang == "auto",
+                word_timestamps=True, beam_size=5, vad_filter=vad, condition_on_previous_text=False)
+            out, dropped, lps = [], {"loop": 0, "no_speech": 0, "repeat": 0}, []
+            for i, seg in enumerate(segs):  # generator: decoding happens while iterating
+                # Whisper hallucination guards: repetition loops (seen on songs: "nan nan nan ...")
+                # and low-confidence segments over music/silence.
+                if seg.compression_ratio > 2.4:
+                    dropped["loop"] += 1
+                    continue
+                if seg.no_speech_prob > 0.6 and seg.avg_logprob < -1.0:
+                    dropped["no_speech"] += 1
+                    continue
+                seg_words = [w.word.strip().lower() for w in (seg.words or []) if w.word.strip()]
+                lps.append(seg.avg_logprob)
+                if len(seg_words) >= 6 and len(set(seg_words)) / len(seg_words) < 0.3:
+                    dropped["loop"] += 1  # e.g. 43 words, 2 distinct
+                    continue
+                for w in (seg.words or []):
+                    text = w.word.replace('"', "").strip()
+                    if not text:
+                        continue
+                    if REPEAT_TOKEN.match(text.lower()):
+                        dropped["repeat"] += 1  # glued loop token like "nannannannan"
+                        continue
+                    if len(out) >= 2 and out[-1]["text"].lower() == out[-2]["text"].lower() == text.lower():
+                        dropped["repeat"] += 1  # third+ identical word in a row
+                        continue
+                    out.append({"text": text, "start": w.start, "duration": w.end - w.start,
+                                "sequence_id": i, "sentence": seg.text.replace('"', "")})
+            if job_id and any(dropped.values()):
+                jlog(job_id, f"  transcript guard dropped {dropped}")
+                JOBS[job_id]["transcript_dropped"] = dropped
+            info.hl_avg_logprob = float(np.mean(lps)) if lps else None
+            return out, info
+
+        words, info = run(vad=True)
+        if not words:  # VAD can drop speech under loud music; try once without it
+            if job_id:
+                jlog(job_id, "  no speech after VAD; retrying transcription without VAD")
+            words, info = run(vad=False)
+        detected = f"{info.language} ({info.language_probability:.2f})"
+        sample = " ".join(w["text"] for w in words[:15])
+        transcript_done(asr if asr == "hinglish" else name, dev, len(audio) / 16000, time.time() - t0,
+                        len(words), lang=lang, detected=detected, sample=sample)
+        if job_id and JOBS[job_id].get("transcript") is not None:
+            JOBS[job_id]["transcript"]["avg_logprob"] = getattr(info, "hl_avg_logprob", None)
+        if job_id:
+            JOBS[job_id]["transcript_segments"] = _segments(words)
         return pd.DataFrame(words)
     except Exception as e:  # noqa: BLE001 - fall back, but say exactly why
         msg = f"{type(e).__name__}: {e}"
@@ -604,6 +850,19 @@ def _fast_transcript(wav_filename, language):
             jlog(job_id, f"  fast transcription FAILED ({msg[:300]}); falling back to slow uvx whisperx")
             JOBS[job_id]["transcript"] = {"path": "uvx whisperx fallback", "error": msg[:500]}
         return _ORIG_TRANSCRIPT(wav_filename, language)
+
+
+def _segments(words):
+    """Group transcript words into timestamped lines for the report."""
+    out = []
+    for w in words:
+        if out and out[-1]["seq"] == w["sequence_id"]:
+            out[-1]["text"] += " " + w["text"]
+            out[-1]["end"] = round(w["start"] + w["duration"], 2)
+        else:
+            out.append({"seq": w["sequence_id"], "start": round(w["start"], 2),
+                        "end": round(w["start"] + w["duration"], 2), "text": w["text"]})
+    return [{k: v for k, v in seg.items() if k != "seq"} for seg in out]
 
 
 def _install_transcript_hook():
@@ -618,7 +877,19 @@ def _install_transcript_hook():
 
 
 @app.on_event("startup")
+def _warm_catalog():
+    try:
+        import audio_match as AM
+        AM.build_catalog(log=lambda m: print(m, flush=True))
+        BOOT["trending_catalog"] = AM.STATE["status"]
+    except Exception as e:  # noqa: BLE001 - surfaced on /health
+        BOOT["trending_catalog"] = f"FAILED {type(e).__name__}: {e}"[:300]
+
+
 def _startup():
+    threading.Thread(target=_warm_catalog, daemon=True).start()
+    if DEFAULT_ASR == "hinglish":
+        threading.Thread(target=_warm_hinglish, daemon=True).start()
     try:  # import check only; the model loads on the first transcription
         import faster_whisper, ctranslate2
         BOOT["faster_whisper"] = (f"{faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, "
@@ -679,6 +950,22 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
             model = load_model()
             release_unneeded(job_id, model, j.get("modalities", DEFAULT_MODALITIES))
             set_step(job_id, "events")
+            if j["modalities"].get("audio") or j.get("text_mode") != "off":
+                try:
+                    with timed("events", "speech_gate"):
+                        speech_gate(job_id, video)
+                except JobCancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 - gate is advisory; keep the requested mode
+                    jlog(job_id, f"  speech gate failed ({type(e).__name__}: {e}); keeping transcript mode")
+            if j["modalities"].get("audio") or j.get("text_mode") != "off":
+                try:
+                    with timed("events", "song_match"):
+                        song_lookup(job_id, video, source_name)
+                except JobCancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 - context only
+                    jlog(job_id, f"  song match failed ({type(e).__name__}: {e})")
             events = model.get_events_dataframe(video_path=str(video))
             mods = j.get("modalities", DEFAULT_MODALITIES)
             drop = [t for m, t in (("video", "Video"), ("audio", "Audio")) if not mods.get(m)]
@@ -761,7 +1048,31 @@ def _write_outputs(job_id, job, video, source_name, preds, segments):
     report["neural_source"] = f"tribev2-full ({DEVICE})"
     mods = JOBS[job_id].get("modalities", DEFAULT_MODALITIES)
     report["modalities"] = mods
-    if not all(mods.values()):
+    gate = JOBS[job_id].get("speech_gate")
+    if gate:
+        report["speech_gate"] = {k: v for k, v in gate.items() if not k.endswith("_per_second")}
+        report.setdefault("series", {})["speech_prob"] = gate.get("speech_per_second", [])
+        report["series"]["vocals_prob"] = gate.get("vocals_per_second", [])
+    jj = JOBS[job_id]
+    segs = jj.get("transcript_segments")
+    tr_info = jj.get("transcript") or {}
+    report["transcript"] = {
+        "used_by_model": bool(mods.get("text")) and bool(segs),
+        "status": ("used" if mods.get("text") and segs else
+                   f"skipped: {(gate or {}).get('reason', 'transcript off')}" if gate and not mods.get("text") else
+                   "off" if not mods.get("text") else "no speech found"),
+        "model": tr_info.get("model"), "lang": tr_info.get("lang"), "detected": tr_info.get("detected"),
+        "words": tr_info.get("words"), "segments": segs or [],
+        "dropped_by_guard": jj.get("transcript_dropped"),
+    }
+    am = JOBS[job_id].get("audio_match")
+    report["audio"] = {"type": (gate or {}).get("audio_type"), "song": (am or {}).get("song"),
+                       "reused_by": (am or {}).get("reuse", []),
+                       "note": "context only, not a score input"}
+    gated_off = bool(gate) and gate.get("decision") == "transcript off"
+    if gated_off and mods.get("video") and mods.get("audio"):
+        report["method"] += f"; transcript skipped by speech gate ({gate['reason']}), scored on visuals + sound"
+    elif not all(mods.values()):
         used = "+".join(m for m, on in mods.items() if on)
         report["method"] += f"; partial modalities ({used}), diagnostic run"
     (job / "report.json").write_text(json.dumps(report, indent=1))
@@ -801,8 +1112,16 @@ def health():
 @app.post("/analyze")
 async def analyze(background: BackgroundTasks, video: UploadFile = File(...),
                   video_on: bool = Query(True, alias="video"), audio_on: bool = Query(True, alias="audio"),
-                  text_on: bool = Query(False, alias="text")):
-    mods = {"video": video_on, "audio": audio_on, "text": text_on}
+                  text: str = Query(DEFAULT_TEXT_MODE), lang: str = Query(DEFAULT_LANG),
+                  asr: str = Query(DEFAULT_ASR)):
+    if asr not in ASRS:
+        return JSONResponse({"error": f"asr must be one of {sorted(ASRS)}"}, status_code=422)
+    if lang not in LANGS:
+        return JSONResponse({"error": f"lang must be one of {sorted(LANGS)}"}, status_code=422)
+    text_mode = {"1": "on", "true": "on", "0": "off", "false": "off"}.get(text.lower(), text.lower())
+    if text_mode not in TEXT_MODES:
+        return JSONResponse({"error": f"text must be one of {sorted(TEXT_MODES)}"}, status_code=422)
+    mods = {"video": video_on, "audio": audio_on, "text": text_mode != "off"}
     if not any(mods.values()):
         return JSONResponse({"error": "enable at least one of video, audio, text"}, status_code=422)
     job_id = uuid.uuid4().hex[:8]
@@ -812,25 +1131,31 @@ async def analyze(background: BackgroundTasks, video: UploadFile = File(...),
     dest = job / f"input{ext}"
     with dest.open("wb") as f:
         shutil.copyfileobj(video.file, f)
-    return _enqueue(background, job_id, dest, video.filename or dest.name, modalities=mods)
+    return _enqueue(background, job_id, dest, video.filename or dest.name, modalities=mods, lang=lang, asr=asr,
+                    text_mode=text_mode)
 
 
 def _enqueue(background: BackgroundTasks, job_id: str, dest: Path, source: str, restarted_from=None,
-             modalities=None):
+             modalities=None, lang=None, asr=None, text_mode=None):
+    lang = lang or DEFAULT_LANG
+    text_mode = text_mode or DEFAULT_TEXT_MODE
+    asr = asr or DEFAULT_ASR
     modalities = modalities or dict(DEFAULT_MODALITIES)
     video_s = _video_seconds(dest)
     est = sum(_estimate(k, video_s, modalities) for k, *_ in STEPS)
     JOBS[job_id] = {"status": "queued", "stage": "queued", "stage_label": "Waiting for the GPU",
                     "step": 0, "steps": len(STEPS), "video_s": round(video_s, 1),
                     "input": str(dest), "source": source, "created": time.time(),
-                    "restarted_from": restarted_from, "modalities": modalities}
+                    "restarted_from": restarted_from, "modalities": modalities, "lang": lang, "asr": asr,
+                    "text_mode": text_mode}
     on = "+".join(m for m, v in modalities.items() if v)
     jlog(job_id, f"queued {source} ({video_s:.1f}s video, modalities {on}, est {est:.0f}s"
                  f"{', restart of ' + restarted_from if restarted_from else ''}"
                  f"{', GPU busy' if GPU_LOCK.locked() else ''})")
     background.add_task(run_job, job_id, dest, source)
     return {"job_id": job_id, "status": "queued", "video_s": round(video_s, 1), "estimate_s": round(est),
-            "restarted_from": restarted_from, "modalities": modalities}
+            "restarted_from": restarted_from, "modalities": modalities, "lang": lang, "asr": asr,
+            "text_mode": text_mode}
 
 
 @app.post("/jobs/{job_id}/cancel")
@@ -859,7 +1184,9 @@ def restart_job(job_id: str, background: BackgroundTasks):
     new_id = uuid.uuid4().hex[:8]
     (WORK / new_id).mkdir(parents=True)
     return _enqueue(background, new_id, Path(j["input"]), j.get("source", "video"), restarted_from=job_id,
-                    modalities=j.get("modalities"))
+                    modalities=dict(j.get("modalities") or DEFAULT_MODALITIES,
+                                    text=j.get("text_mode", DEFAULT_TEXT_MODE) != "off"),
+                    lang=j.get("lang"), asr=j.get("asr"), text_mode=j.get("text_mode"))
 
 
 @app.get("/jobs/{job_id}")

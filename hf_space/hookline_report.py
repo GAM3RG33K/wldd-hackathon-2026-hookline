@@ -135,7 +135,7 @@ def word_signal(tsv, T):
     if not tsv or not Path(tsv).exists():
         return np.zeros(T), None, []
     try:
-        w = pd.read_csv(tsv, sep="\t")
+        w = pd.read_csv(tsv, sep="\t", keep_default_na=False)  # a word "nan" is text, not NaN
     except pd.errors.EmptyDataError:
         return np.zeros(T), None, []
     if len(w) == 0:

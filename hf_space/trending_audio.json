@@ -1,0 +1,97 @@
+{
+ "updated": "2026-10-10",
+ "how_to_update": "Add {title, artist, list, region, itunes_id, preview_url}. Find previews with https://itunes.apple.com/search?term=<title artist>&media=music&entity=song&country=IN. Instagram has no trending API: copy titles from public weekly lists by hand.",
+ "sources": [
+  "https://creatordb.app/free-tools/trending-instagram-audio/"
+ ],
+ "tracks": [
+  {
+   "title": "Patient Zero",
+   "artist": "Taylor Swift",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6814996157,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview211/v4/ce/2e/4e/ce2e4e2d-445b-6b79-74b9-56cc6480796c/mzaf_13807124895416978287.plus.aac.p.m4a"
+  },
+  {
+   "title": "Nicole Kidman",
+   "artist": "ADÉLA",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6807192825,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/ba/11/5d/ba115d19-8dea-ad88-2a55-4b541693d50d/mzaf_6631461584091838072.plus.aac.p.m4a"
+  },
+  {
+   "title": "Pure",
+   "artist": "SIENNA SPIRO",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6769552686,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview211/v4/9d/88/50/9d885030-f45b-9588-7ed1-f56f7c4708fe/mzaf_4786473538403633972.plus.aac.p.m4a"
+  },
+  {
+   "title": "Upside Down",
+   "artist": "Diana Ross",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 1440829170,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/4d/81/95/4d8195b6-289a-09f8-1ce1-a621546c95bb/mzaf_17847433464280119148.plus.aac.p.m4a"
+  },
+  {
+   "title": "Stop The Wedding!",
+   "artist": "Ashe",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6795697687,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/f2/5b/f7/f25bf72b-3eaa-4f4e-76bd-00d5fd9ea2b9/mzaf_15368875546218592546.plus.aac.p.m4a"
+  },
+  {
+   "title": "Someday We Will Dream About Today",
+   "artist": "The Sways",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6779800530,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview211/v4/1a/ad/ce/1aadce2d-bf52-7b71-3f52-112f458d2196/mzaf_16616142841419872718.plus.aac.p.m4a"
+  },
+  {
+   "title": "Funkytown",
+   "artist": "Lipps, Inc.",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 1552121134,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview211/v4/8e/c5/ef/8ec5ef7d-efbc-7188-9e82-562f10aebfa9/mzaf_16072069775785280832.plus.aac.p.m4a"
+  },
+  {
+   "title": "Hello October",
+   "artist": "Sugar Lime Blue",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 1643593640,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview122/v4/b1/23/4e/b1234ed2-b7b4-480c-4456-d54e504fe0d5/mzaf_14139240607170760404.plus.aac.p.m4a"
+  },
+  {
+   "title": "SaWaDiKa",
+   "artist": "LISA",
+   "list": "CreatorDB trending Instagram audio, week of 2026-10-07",
+   "region": "global",
+   "itunes_id": 6809951681,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/e4/9b/4c/e49b4c34-a8b8-768a-219d-5dbbf4ba1632/mzaf_1881804970065809695.plus.aac.p.m4a"
+  },
+  {
+   "title": "Chaand Baaliyan",
+   "artist": "Aditya A",
+   "list": "India web roundups 2026 (unverified)",
+   "region": "IN",
+   "itunes_id": 1611001829,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/66/b9/24/66b924d3-43d2-7a22-a3c2-d0dde2a7f779/mzaf_12864867457310936312.plus.aac.p.m4a"
+  },
+  {
+   "title": "Dhurandhar - Title Track (Eclipsa Audio)",
+   "artist": "Hanumankind, Shashwat Sachdev, Jasmine Sandlas, Sudhir Yaduvanshi, Muhammad Sadiq & Ranjit Kaur",
+   "list": "India web roundups 2026 (unverified)",
+   "region": "IN",
+   "itunes_id": 6784139278,
+   "preview_url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/3c/30/02/3c3002b4-a8a3-8bbb-ab1e-67be7f8ba139/mzaf_18353104819549177576.plus.aac.p.m4a"
+  }
+ ]
+}

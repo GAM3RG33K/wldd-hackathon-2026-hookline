@@ -23,6 +23,7 @@ import uuid
 import webbrowser
 from pathlib import Path
 
+from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 from textual import on, work
@@ -125,6 +126,30 @@ def eta_text(p):
     if p.get("overrun_s") is not None:
         return f"ETA unknown, {fmt_dur(p['overrun_s'])} over estimate"
     return "ETA unknown"
+
+
+AUDIO_TYPES = {"song": "song", "speech_over_music": "speech over music", "speech": "speech",
+               "instrumental": "instrumental music", "humming": "humming / chant", "other": "no clear speech"}
+
+
+def audio_text(audio, gate=None):
+    """One line: audio type, matched song + trending list, reuse across reels, transcript decision."""
+    audio, gate = audio or {}, gate or {}
+    kind = AUDIO_TYPES.get(audio.get("type") or gate.get("audio_type"), "")
+    if not kind and not gate:
+        return None
+    t = Text("audio: ", "dim")
+    t.append(kind or "?", "bold")
+    song = audio.get("song")
+    if song:
+        t.append(f" · ♪ {song['title']} - {song['artist']}", "bold magenta")
+        t.append(f" (trending list: {song.get('list', '?')})", "magenta")
+    reused = audio.get("reused_by") or audio.get("reuse") or []
+    if reused:
+        t.append(f" · same audio in {len(reused)} other reel(s)", "yellow")
+    if gate.get("decision"):
+        t.append(f" · {gate['decision']}", "green" if gate["decision"].endswith("on") else "yellow")
+    return t
 
 
 def fmt_views(v):
@@ -254,7 +279,9 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   r        jump to a random sample reel
   w        open the selected report in the browser (chart + PNG)
   v a t    toggle video / audio / transcript for full TRIBE runs
-           (defaults: video + audio on, transcript off; off = model never loads)
+  l        transcription language: auto (Hindi/English/Hinglish) / hi / en
+           transcript cycles auto / on / off. auto: a speech gate checks how much of the
+           reel is speech; songs and humming are scored on visuals + sound, not words
   x        stop the running Space job (exits after the current item)
   ctrl+r   restart the running Space job (no re-upload, model stays loaded)
   tab      switch between reels and report
@@ -310,6 +337,7 @@ class Hookline(App):
         Binding("v", "toggle('video')", "Video", show=False),
         Binding("a", "toggle('audio')", "Audio", show=False),
         Binding("t", "toggle('text')", "Transcript", show=False),
+        Binding("l", "cycle_lang", "Language", show=False),
         Binding("ctrl+r", "restart", "Restart job", show=False),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
@@ -324,7 +352,10 @@ class Hookline(App):
         self.token = ""
         self.space_run = None  # in-flight Space job: {d, sid, t0, last_ok, p}
         # Modalities for full TRIBE runs; disabled ones never load their model on the Space.
-        self.mods = {"video": True, "audio": True, "text": False}
+        self.mods = {"video": True, "audio": True, "text": True}
+        # transcript: auto = speech gate decides per reel (songs/humming scored on visuals + sound)
+        self.text_mode = "auto"
+        self.lang = "auto"  # transcription language: auto (Hindi/English/Hinglish), hi, en
 
     # ---- layout
     def compose(self) -> ComposeResult:
@@ -398,7 +429,10 @@ class Hookline(App):
         mods = Text("   full run: ")
         for key, name in (("video", "v video"), ("audio", "a audio"), ("text", "t transcript")):
             on = self.mods[key]
-            mods.append(f"[{'x' if on else ' '}] {name}  ", "bold green" if on else "dim")
+            box = {"auto": "a", "on": "x", "off": " "}[self.text_mode] if key == "text" else ("x" if on else " ")
+            mods.append(f"[{box}] {name}  ", "bold green" if on else "dim")
+        if self.text_mode != "off":
+            mods.append(f"l {self.lang}  ", "bold")
         right = Text.assemble(mods, "backend ", b, "   space ", s)
         if len(t) + len(right) + 3 > self.size.width:  # narrow terminal: drop the tagline
             t = Text("HOOKLINE", "bold")
@@ -459,18 +493,34 @@ class Hookline(App):
         m = r["moments"]
         sw, ww = m["strongest_window_s"], m["weakest_window_s"]
         drops = ", ".join(f"{fmt_t(a)}-{fmt_t(b)}" for a, b in m.get("drop_zones_s", [])) or "none"
-        self.query_one("#moments", Static).update(Text.assemble(
+        moments = Text.assemble(
             ("peak ", "dim"), fmt_t(m["peak_attention_at_s"]),
             ("   strongest ", "dim"), f"{fmt_t(sw[0])}-{fmt_t(sw[1])}",
             ("   weakest ", "dim"), f"{fmt_t(ww[0])}-{fmt_t(ww[1])}",
-            ("   drops ", "dim"), drops))
+            ("   drops ", "dim"), drops)
+        line = audio_text(r.get("audio"), r.get("speech_gate"))
+        if line:
+            moments.append("\n")
+            moments.append(line)
+        self.query_one("#moments", Static).update(moments)
         tbl = Table(expand=True, box=None, show_header=True, header_style="dim", pad_edge=False)
         tbl.add_column("AT", style="bold green", no_wrap=True, width=11)
         tbl.add_column("ISSUE", ratio=2)
         tbl.add_column("FIX", ratio=3)
         for x in r["recommendations"]:
             tbl.add_row(x["at"], x["issue"], x["fix"])
-        self.query_one("#recs", Static).update(tbl)
+        tr = r.get("transcript") if isinstance(r.get("transcript"), dict) else {}
+        if tr.get("segments") or tr.get("status"):
+            lines = Text(f"\nTranscript {'used for judging' if tr.get('used_by_model') else '(not used)'}",
+                         "bold")
+            lines.append(f"  {tr.get('status', '')} · {tr.get('detected') or ''}\n", "dim")
+            for seg in (tr.get("segments") or [])[:40]:
+                lines.append(f"{fmt_t(seg['start']):>6} ", "green")
+                lines.append(seg["text"] + "\n")
+            tbl_group = Group(tbl, lines)
+            self.query_one("#recs", Static).update(tbl_group)
+        else:
+            self.query_one("#recs", Static).update(tbl)
         self.query_one("#method", Static).update(Text(
             f"\n{r.get('method', '')} · neural: {r.get('neural_source', '?')}", "dim italic"))
         for w in ("#tiles", "#strip-h", "#strip", "#moments", "#recs-h", "#recs", "#method"):
@@ -568,7 +618,7 @@ class Hookline(App):
         mb = Path(d["path"]).stat().st_size / 1e6
         self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space …")
         try:
-            q = "&".join(f"{k}={int(v)}" for k, v in self.mods.items())
+            q = f"video={int(self.mods['video'])}&audio={int(self.mods['audio'])}&text={self.text_mode}&lang={self.lang}"
             res = post_video(f"{SPACE}/analyze?{q}", d["path"], token=tok)
         except Exception as e:
             self.call_from_thread(self.say, f"Space upload failed: {e}", "red")
@@ -598,6 +648,7 @@ class Hookline(App):
                 jd = OUT / job
                 jd.mkdir(parents=True, exist_ok=True)
                 r["preview"] = False
+                r["local_video"] = str(Path(d["path"]).resolve())  # web report plays it from disk
                 (jd / "report.json").write_text(json.dumps(r, indent=1))
                 for ext in ("png", "md"):
                     try:
@@ -691,6 +742,17 @@ class Hookline(App):
             t.append(f"{right}\n", "dim")
         if not p.get("plan"):
             t.append(f" · {p.get('stage_label', 'Waiting for the GPU')}\n", "dim")
+        gate = p.get("speech_gate")
+        if gate:
+            off = gate.get("decision") == "transcript off"
+            t.append(f"\n   speech gate: {gate.get('decision')} · {gate.get('reason')}\n",
+                     "yellow" if off else "green")
+            am = p.get("audio_match") or {}
+            line = audio_text({"type": gate.get("audio_type"), "song": am.get("song"), "reuse": am.get("reuse")})
+            if line:
+                t.append("   ")
+                t.append(line)
+                t.append("\n")
         sub = p.get("substep")
         if sub:
             t.append(f"\n   now: {sub['name']} · {fmt_dur(sub.get('elapsed_s'))}\n", "cyan")
@@ -751,6 +813,18 @@ class Hookline(App):
         self.query_one("#title", Static).update(t)
 
     def action_toggle(self, key):
+        if key == "text":  # auto -> on -> off
+            order = ["auto", "on", "off"]
+            mode = order[(order.index(self.text_mode) + 1) % 3]
+            if mode == "off" and not (self.mods["video"] or self.mods["audio"]):
+                self.say("Keep at least one of video, audio, transcript on.", "yellow")
+                return
+            self.text_mode = mode
+            self.mods["text"] = mode != "off"
+            self.set_header()
+            self.say({"auto": "Transcript: auto (speech gate decides; songs/humming scored on visuals + sound)",
+                      "on": "Transcript: always on", "off": "Transcript: off"}[mode])
+            return
         new = dict(self.mods, **{key: not self.mods[key]})
         if not any(new.values()):
             self.say("Keep at least one of video, audio, transcript on.", "yellow")
@@ -759,6 +833,13 @@ class Hookline(App):
         self.set_header()
         on = " + ".join(k for k, v in self.mods.items() if v)
         self.say(f"Full TRIBE runs will use: {on}. Models for the others are never loaded.")
+
+    def action_cycle_lang(self):
+        order = ["auto", "hi", "en"]
+        self.lang = order[(order.index(self.lang) + 1) % len(order)]
+        self.set_header()
+        what = {"auto": "auto-detect (Hindi, English, Hinglish)", "hi": "Hindi", "en": "English"}[self.lang]
+        self.say(f"Transcription language: {what}" + ("" if self.mods["text"] else " (turn transcript on with t)"))
 
     def action_stop(self):
         run = self.space_run
