@@ -69,6 +69,8 @@ def run_preview(job: Path, video: Path, source_name: str) -> dict:
     report, d = HL.analyse(job, video)
     report["preview"] = True
     report["neural_source"] = NEURAL_SOURCE
+    import suggest as SG
+    report["suggestions"] = SG.suggest(report)
     report["source_id"] = Path(source_name).stem  # list reports by the uploaded file's name
     report["local_video"] = str(video.resolve())
     (job / "report.json").write_text(json.dumps(report, indent=1))
@@ -273,6 +275,46 @@ def import_space_job(space_job: str, video: str, source_id: str = ""):
     return {"job_id": f"s-{space_job}", "report": report}
 
 
+_VERIFYING = set()
+
+
+@app.post("/report/{job_id}/verify")
+def verify_report(job_id: str, redirect: bool = False):
+    """Model-check the top editing suggestions (renders each edit, one full GPU run per edit)."""
+    import threading
+    from fastapi.responses import RedirectResponse
+    if job_id in _VERIFYING:
+        return JSONResponse({"status": "already running"}, status_code=409)
+    p = OUT / job_id / "report.json"
+    if not p.exists() or not (OUT / job_id / "raw" / "meta.json").exists():
+        return JSONResponse({"error": "needs a full TRIBE report built from raw output"}, status_code=404)
+
+    def run():
+        import verify as VF
+        _VERIFYING.add(job_id)
+        try:
+            VF.verify(OUT / job_id)
+        except Exception as e:  # noqa: BLE001 - shown on the report page
+            r = json.loads(p.read_text())
+            r["verify_status"] = f"failed: {type(e).__name__}: {e}"[:300]
+            p.write_text(json.dumps(r, indent=1))
+        finally:
+            _VERIFYING.discard(job_id)
+
+    threading.Thread(target=run, daemon=True).start()
+    if redirect:
+        return RedirectResponse(f"/report/{job_id}/view", status_code=303)
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.get("/report/{job_id}/variant/{name}")
+def report_variant(job_id: str, name: str):
+    v = OUT / job_id / "variants" / name / "edited.mp4"
+    if not v.exists() or ".." in name:
+        return JSONResponse({"error": "no such variant"}, status_code=404)
+    return FileResponse(v, media_type="video/mp4")
+
+
 @app.post("/report/{job_id}/regenerate")
 def regenerate(job_id: str, redirect: bool = False):
     """Rebuild a report from its stored raw model output with the current formulas."""
@@ -307,6 +349,70 @@ def report_video(job_id: str):
     if v is None:
         return JSONResponse({"error": "local video not found"}, status_code=404)
     return FileResponse(v, media_type="video/mp4")
+
+
+EMO_COLORS = {"amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
+              "tension": "#ef4444", "outrage": "#b91c1c", "warmth": "#22c55e", "sadness": "#3b82f6", "neutral": "#555"}
+
+
+def _emotion_html(r: dict) -> str:
+    import html
+    em = r.get("emotion")
+    if not em:
+        return ""
+    s = em["series"]
+    T = len(s["arousal"]) or 1
+    cells = "".join(f'<i title="{_fmt_t(t)} {d} (arousal {a:.2f})" style="flex:1;background:{EMO_COLORS.get(d, "#555")};'
+                    f'opacity:{0.15 + 0.85 * a:.2f}"></i>' for t, (d, a) in enumerate(zip(s["dominant"], s["arousal"])))
+    sm = em["summary"]
+    dom = ", ".join(f'{x["emotion"]} {x["share"]:.0%}' for x in sm.get("dominant_emotions", [])) or "mostly neutral"
+    peaks = ", ".join(f'{_fmt_t(p["at_s"])} {p["emotion"]}' for p in sm.get("peak_moments", [])) or "none"
+    legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e}</span>' for e, c in EMO_COLORS.items()
+                     if e != "neutral")
+    br = em.get("brain_salience_r")
+    return f"""<div class=emo><div class=band title="emotion per second (colour = emotion, strength = arousal)">{cells}</div>
+<p><b>Emotion</b> (predicted, evoked for an average viewer): {html.escape(dom)} ·
+sequence {html.escape(" → ".join(sm.get("sequence", [])) or "-")} · arc {html.escape(sm.get("arc", "-"))} ·
+high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)}</p>
+<p class=muted>channels: {", ".join(em.get("channels", []))}{f" · brain salience agreement r={br:+.2f}" if br is not None else ""}
+· {html.escape(em.get("note", ""))}</p><figcaption>{legend}</figcaption></div>"""
+
+
+def _suggestions_html(r: dict, job_id: str) -> str:
+    import html
+    sugs = r.get("suggestions") or []
+    if not sugs:
+        return ""
+    status = r.get("verify_status")
+    running = bool(status and status.startswith("running"))
+    can_verify = (OUT / job_id / "raw" / "meta.json").exists()
+    items = []
+    for s in sugs:
+        v = s.get("verification")
+        if v and v.get("verdict") in ("improved", "worse", "no clear change"):
+            color = {"improved": "var(--hook)", "worse": "var(--drop)"}.get(v["verdict"], "var(--muted)")
+            name = Path(v.get("edited_video", "")).parent.name
+            badge = (f'<span class=badge style="border-color:{color};color:{color}">model-checked: {v["verdict"]}'
+                     f' · engagement {v["engagement_change_pct"]:+.1f}%'
+                     f'{" · first 3s " + format(v["first_3s_change_pct"], "+.1f") + "%" if s["edit"] == "cold_open" else ""}'
+                     f'</span> <details class=variant><summary>watch the edited version</summary>'
+                     f'<video controls preload=none src="/report/{job_id}/variant/{name}"></video>'
+                     f'{"<p class=muted>Simulation: " + html.escape(v["approximate"]) + "</p>" if v.get("approximate") else ""}'
+                     f'</details>')
+        elif v:
+            badge = f'<span class="badge muted">{html.escape(v.get("verdict", ""))}: {html.escape(v.get("reason", ""))}</span>'
+        else:
+            badge = '<span class="badge muted">not model-checked yet</span>'
+        items.append(f'<li><b>{html.escape(s["at"])}</b> {html.escape(s["suggestion"])} {badge}'
+                     f'<br><span class=muted>Why: {html.escape(s["why"])}. Est. viewers lost here: '
+                     f'{s["impact"]["viewers_lost_pct"]:.1f}% (model estimate).</span></li>')
+    btn = ""
+    if can_verify and not running:
+        btn = (f'<form method=post action="/report/{job_id}/verify?redirect=true" style="display:inline">'
+               f'<button>Verify top 3 edits (~2-3 min GPU each)</button></form>')
+    st = f'<span class=muted>{html.escape(status)}</span>' if status else ""
+    return (f'<h2>Editing suggestions <span class=muted style="font-weight:400;font-size:1rem">'
+            f'ranked by viewers lost</span></h2>{btn} {st}<ol class=sugs>{"".join(items)}</ol>')
 
 
 def _transcript_html(r: dict) -> str:
@@ -421,6 +527,7 @@ def view_report(job_id: str):
                                       f'<div class="s">{sub}</div></div>')
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Hookline report {job_id}</title>
+{'<meta http-equiv=refresh content=10>' if str(r.get('verify_status', '')).startswith('running') else ''}
 <style>
 :root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#ea8a0c;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#f5a524}}}}
@@ -453,6 +560,10 @@ details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;marg
 .player video{{width:100%;max-height:60vh;border-radius:12px;background:#000}}
 .player code{{font-size:.7rem;word-break:break-all}}
 .playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
+.emo .band{{display:flex;height:18px;margin:.6rem 0 0 36px;border-radius:4px;overflow:hidden}}
+.emo .band i{{display:block}} .emo p{{margin:.4rem 0 0 36px;font-size:.9rem}} .emo figcaption{{margin-left:36px}}
+ol.sugs li{{margin:.6rem 0}} .badge{{display:inline-block;font-size:.75rem;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin-left:4px}}
+details.variant video{{max-height:45vh;border-radius:8px;margin-top:.4rem}}
 ul.transcript{{list-style:none;padding:0;columns:2;column-gap:24px}} ul.transcript li{{break-inside:avoid;margin:.2rem 0}}
 a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 @media (max-width:800px){{.media{{grid-template-columns:1fr}} ul.transcript{{columns:1}}}}
@@ -467,7 +578,8 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
 {tile('Viral potential', f"{s['virality']:.0f}", s.get('virality_tag', s['virality_band']))}
 </div>
-<div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}</div></div>
+<div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}{_emotion_html(r)}</div></div>
+{_suggestions_html(r, job_id)}
 {_transcript_html(r)}
 {'<h2>What to change</h2><ul>' + recs + '</ul>' if HL.SHOW_SUGGESTIONS else ''}
 {png_html}

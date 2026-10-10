@@ -35,13 +35,13 @@ def hf_token():
     return out.splitlines()[-1] if out else ""
 
 
-def fetch_raw(space_job, token=None, out=OUT):
-    """Download the Space job's raw bundle into backend/out/s-<job>/raw/ (keep it forever)."""
+def fetch_raw(space_job, token=None, out=OUT, dest=None):
+    """Download the Space job's raw bundle into backend/out/s-<job>/raw/ (or `dest`); keep it forever."""
     req = urllib.request.Request(f"{SPACE}/jobs/{space_job}/raw",
                                  headers={"Authorization": f"Bearer {token or hf_token()}"})
     with urllib.request.urlopen(req, timeout=300) as r:
         data = r.read()
-    raw = out / f"s-{space_job}" / "raw"
+    raw = Path(dest) if dest else out / f"s-{space_job}" / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(raw)
@@ -71,6 +71,13 @@ def rescore(job_dir, video=None, source_id=None):
     report.update(preview=False, local_video=str(video.resolve()),
                   source_id=source_id or old.get("source_id") or video.stem,
                   space_job=meta.get("space_job"), regenerated_locally=True)
+    # keep model-check results already paid for in GPU time when the same edit is suggested again
+    done = {(x["edit"], x.get("start"), x.get("end")): x.get("verification")
+            for x in old.get("suggestions") or [] if x.get("verification")}
+    for x in report.get("suggestions") or []:
+        x["verification"] = done.get((x["edit"], x.get("start"), x.get("end")))
+    if old.get("verify_status"):
+        report["verify_status"] = old["verify_status"]
     (job_dir / "report.json").write_text(json.dumps(report, indent=1))
     HL.write_md(report, job_dir / "report.md")
     HL.write_png(report, d, job_dir / "report.png")

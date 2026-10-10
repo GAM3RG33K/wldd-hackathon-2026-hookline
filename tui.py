@@ -46,7 +46,7 @@ BAND_STYLE = {"Bad": "red", "Weak": "yellow", "Average": "cyan", "Strong": "gree
               "Low reach": "red", "Above average": "green", "Popular": "green", "Viral potential": "bold green"}
 BLOCKS = " ▁▂▃▄▅▆▇█"
 POLL_S = 1.0  # Space progress poll interval; /jobs is an in-memory lookup, cheap to hit
-SHOW_SUGGESTIONS = False  # MVP0: judgement only; suggestions return in MVP1
+SHOW_SUGGESTIONS = True  # evidence-based editing suggestions (tribe/suggest.py), not the old templates
 
 
 # ---------------------------------------------------------------- data / http
@@ -293,6 +293,7 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   w        open the selected report in the browser (video + chart + transcript)
   R        open all reports in the browser (live list, refreshes every 5s)
   g        regenerate the selected report from its raw model output (current formulas)
+  V        model-check the top 3 editing suggestions (renders each edit, runs it on the GPU)
   v a t    toggle video / audio / transcript for full TRIBE runs
   l        transcription language: auto (Hindi/English/Hinglish) / hi / en
 
@@ -354,6 +355,7 @@ class Hookline(App):
         Binding("w", "web", "Web view"),
         Binding("R", "all_reports", "All reports"),
         Binding("g", "regenerate", "Regenerate", show=False),
+        Binding("V", "verify", "Verify edits", show=False),
         Binding("x", "stop", "Stop job"),
         Binding("v", "toggle('video')", "Video", show=False),
         Binding("a", "toggle('audio')", "Audio", show=False),
@@ -391,7 +393,7 @@ class Hookline(App):
                 yield Static("Attention per second · viewers remaining", classes="section", id="strip-h")
                 yield AttentionStrip(id="strip")
                 yield Static(id="moments")
-                yield Static("What to change", classes="section", id="recs-h")
+                yield Static("Editing suggestions (ranked by viewers lost)", classes="section", id="recs-h")
                 yield Static(id="recs")
                 yield Static(id="method")
         yield Static(id="status")
@@ -600,13 +602,30 @@ class Hookline(App):
         if line:
             moments.append("\n")
             moments.append(line)
+        em = r.get("emotion")
+        if em:
+            sm = em["summary"]
+            dom = ", ".join(f"{x['emotion']} {x['share']:.0%}" for x in sm.get("dominant_emotions", [])) or "neutral"
+            pk = ", ".join(f"{fmt_t(p['at_s'])} {p['emotion']}" for p in sm.get("peak_moments", [])) or "none"
+            moments.append("\nemotion: ", "dim")
+            moments.append(dom, "bold magenta")
+            moments.append(f" · arc {sm.get('arc')} · high-arousal {sm.get('high_arousal_share', 0):.0%}"
+                           f" · peaks {pk}", "magenta")
         self.query_one("#moments", Static).update(moments)
         tbl = Table(expand=True, box=None, show_header=True, header_style="dim", pad_edge=False)
-        tbl.add_column("AT", style="bold green", no_wrap=True, width=11)
-        tbl.add_column("ISSUE", ratio=2)
-        tbl.add_column("FIX", ratio=3)
-        for x in (r["recommendations"] if SHOW_SUGGESTIONS else []):
-            tbl.add_row(x["at"], x["issue"], x["fix"])
+        tbl.add_column("AT", style="bold green", no_wrap=True, width=10)
+        tbl.add_column("EDIT", ratio=3)
+        tbl.add_column("WHY (vs your best part)", ratio=3, style="dim")
+        tbl.add_column("LOST", justify="right", width=6)
+        tbl.add_column("MODEL CHECK", ratio=1)
+        for x in (r.get("suggestions") or [] if SHOW_SUGGESTIONS else []):
+            v = x.get("verification") or {}
+            check = (Text(f"{v['verdict']} {v.get('engagement_change_pct', 0):+.1f}%",
+                          "green" if v["verdict"] == "improved" else "red" if v["verdict"] == "worse" else "dim")
+                     if v.get("verdict") in ("improved", "worse", "no clear change") else Text("not checked", "dim"))
+            tbl.add_row(x["at"], x["suggestion"], x["why"], f"{x['impact']['viewers_lost_pct']:.0f}%", check)
+        if r.get("verify_status"):
+            tbl.caption = f"verification: {r['verify_status']}"
         tr = r.get("transcript") if isinstance(r.get("transcript"), dict) else {}
         if tr.get("segments") or tr.get("status"):
             lines = Text(f"\nTranscript {'used for judging' if tr.get('used_by_model') else '(not used)'}",
@@ -1040,6 +1059,18 @@ class Hookline(App):
         self.call_from_thread(self.show_report, r, job, r.get("source_id") or job)
         self.call_from_thread(self.refresh_saved)
         self.call_from_thread(self.say, f"Regenerated {job} with the current formulas", "green")
+
+    def action_verify(self):
+        job = getattr(self, "current_job", None)
+        if not job or not (OUT / job / "raw" / "meta.json").exists():
+            self.say("Verification needs a full TRIBE report built from raw output.", "yellow")
+            return
+        try:
+            http_json(f"{BACKEND}/report/{job}/verify", timeout=20, data=b"")
+            self.say(f"Verifying the top edits of {job} on the GPU (~2-3 min each). "
+                     "The report updates as each finishes (g to reload).", "green")
+        except Exception as e:
+            self.say(f"Verify failed to start: {e}", "red")
 
     def action_all_reports(self):
         webbrowser.open(f"{BACKEND}/reports")

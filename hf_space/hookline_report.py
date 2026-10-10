@@ -31,8 +31,8 @@ CFG = dict(
     hold_floor=0.93, hold_span=0.065,  # per-second hold prob range (hypothesis)
     silence_db=-45.0,
 )
-# MVP0 shows the judgement only. Suggestions are still computed into report.json
-# ("recommendations") but not displayed until they stop being generic (MVP1).
+# Old template "recommendations" stay hidden (generic). Displayed instead: evidence-based
+# editing "suggestions" from tribe/suggest.py (diagnosed per dip, concrete edit, model-checkable).
 SHOW_SUGGESTIONS = False
 
 # Destrieux atlas labels per functional group. Attention index = sensory + attention +
@@ -49,6 +49,10 @@ GROUPS = {
     "attention": ["S_intrapariet_and_P_trans", "G_parietal_sup", "S_precentral-sup-part"],
     "default_mode": ["G_precuneus", "G_cingul-Post-dorsal", "G_cingul-Post-ventral",
                      "G_pariet_inf-Angular", "G_and_S_cingul-Ant"],
+    # salience / affect (cortical only: TRIBE has no amygdala). Arousal cross-check, never an
+    # emotion label by itself (reverse inference).
+    "salience": ["G_insular_short", "S_circular_insula_ant", "G_Ins_lg_and_S_cent_ins",
+                 "G_and_S_cingul-Mid-Ant", "G_orbital", "G_rectus", "S_orbital_med-olfact"],
 }
 
 
@@ -384,7 +388,17 @@ def analyse(out_dir, video=None):
         "network_mean_response": {g: round(float(v.mean()), 4) for g, v in net_t.items()},
         "recommendations": recs,
         "series": {"attention": [round(float(x), 1) for x in A], "survival_pct": [round(float(x) * 100, 1) for x in surv],
-                   "cuts_s": cuts},
+                   "cuts_s": cuts,
+                   # per-second signals kept so diagnosis/emotion/suggestions can be rebuilt from the report
+                   "motion": [round(float(x), 2) for x in motion],
+                   "loudness_db": [round(float(x), 1) for x in np.maximum(db, CFG["silence_db"])],
+                   "words_per_s": [round(float(x), 2) for x in words_ps] if speech_known else None,
+                   "network_z": {g: [round(float(x), 2) for x in v] for g, v in net_z.items()},
+                   # absolute TRIBE engagement per second: comparable between an original and its edit
+                   "engagement_raw": [round(float(x), 5) for x in eng_raw]},
+        # word-level timeline (exact captions for suggestions); empty when no transcript was used
+        "words_timeline": [{"t": round(float(w["start"]), 2), "w": str(w["text"])} for w in words
+                           if speech_known and str(w.get("text", "")).strip()],
     }
     return result, dict(A=A, surv=surv, net_z=net_z, db=db, motion=motion, cuts=cuts, words=words,
                         drops=drops, peak_hook_t=peak_hook_t, peak_t=peak_t, T=T, hs=hs)
@@ -423,6 +437,13 @@ def finalize(report, extra):
     elif not all(mods.values()):
         used = "+".join(m for m, on in mods.items() if on)
         report["method"] += f"; partial modalities ({used}), diagnostic run"
+    import emotion_fusion as EF
+    import suggest as SG
+    block, efeat = EF.fuse(report, extra)
+    if block:
+        report["emotion"] = block
+        report.setdefault("features", {}).update(efeat)
+    report["suggestions"] = SG.suggest(report)
     return report
 
 

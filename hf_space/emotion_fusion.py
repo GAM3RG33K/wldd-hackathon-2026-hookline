@@ -1,0 +1,166 @@
+"""Fuse per-second emotion cues into one evoked-emotion track (CPU, from report + raw cues).
+
+Predicted emotion the video EVOKES for an average viewer (stimulus-driven), not a measured mood.
+Psychology behind the features:
+  - arousal matters more than valence for sharing (Berger & Milkman 2012)
+  - memory of an experience follows its peak and its end (Kahneman, peak-end rule)
+  - surprise / curiosity early opens an information gap (Loewenstein) = emotional hook
+  - emotional contrast (peaks, shifts) sustains attention; arcs classify the story shape
+"""
+import numpy as np
+
+EMOTIONS = ["amusement", "awe", "surprise", "curiosity", "tension", "outrage", "warmth", "sadness"]
+# circumplex coordinates (arousal 0..1, valence -1..1) per emotion
+AROUSAL = {"amusement": .70, "awe": .80, "surprise": .90, "curiosity": .55, "tension": .85,
+           "outrage": .90, "warmth": .35, "sadness": .25}
+VALENCE = {"amusement": .80, "awe": .70, "surprise": .20, "curiosity": .20, "tension": -.60,
+           "outrage": -.80, "warmth": .80, "sadness": -.70}
+HIGH_AROUSAL = {"amusement", "awe", "surprise", "tension", "outrage"}  # Berger-Milkman sharing drivers
+# GoEmotions (transcript) -> our 8
+GO_MAP = {
+    "amusement": {"amusement": 1.0, "joy": 0.5},
+    "awe": {"admiration": 0.7, "excitement": 0.7},
+    "surprise": {"surprise": 1.0, "realization": 0.5},
+    "curiosity": {"curiosity": 1.0, "confusion": 0.4},
+    "tension": {"fear": 1.0, "nervousness": 1.0},
+    "outrage": {"anger": 1.0, "annoyance": 0.6, "disgust": 0.8, "disapproval": 0.5},
+    "warmth": {"love": 1.0, "caring": 1.0, "gratitude": 0.8, "joy": 0.5, "admiration": 0.3},
+    "sadness": {"sadness": 1.0, "grief": 1.0, "remorse": 0.7, "disappointment": 0.7},
+}
+CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8}
+
+
+def _seconds(x, n, default=None):
+    x = list(x or [])
+    return (x + [default] * n)[:n]
+
+
+def fuse(report, extra):
+    """Return the `emotion` report block plus emotion features; None if no cues were produced."""
+    cues = (extra or {}).get("emotion") or {}
+    gate = (extra or {}).get("speech_gate") or {}
+    n = len(report.get("series", {}).get("attention") or [])
+    if n == 0 or not (cues or gate.get("sounds_per_second")):
+        return None, {}
+    dist = np.zeros((n, len(EMOTIONS)))
+    weight = np.zeros(n)
+    used = []
+
+    vis = cues.get("visual") or {}
+    if vis:
+        used.append("visual")
+        neutral = np.array(_seconds(vis.get("neutral"), n, 0.0) , dtype=float)
+        for j, e in enumerate(EMOTIONS):
+            dist[:, j] += CHANNEL_WEIGHT["visual"] * np.array(_seconds(vis.get(e), n, 0.0), dtype=float)
+        weight += CHANNEL_WEIGHT["visual"] * (1 - neutral)
+
+    text = (cues.get("text") or {}).get("probs") or []
+    if any(text):
+        used.append("text")
+        for t, d in enumerate(_seconds(text, n)):
+            if not d:
+                continue
+            row = np.array([sum(d.get(k, 0) * w for k, w in GO_MAP[e].items()) for e in EMOTIONS])
+            mass = min(1.0, row.sum())
+            if row.sum() > 0:
+                dist[t] += CHANNEL_WEIGHT["text"] * mass * row / row.sum()
+                weight[t] += CHANNEL_WEIGHT["text"] * mass
+
+    sounds = gate.get("sounds_per_second") or {}
+    if sounds:
+        used.append("sounds")
+        for e, series in sounds.items():
+            s = np.array(_seconds(series, n, 0.0), dtype=float)
+            s = np.where(s > 0.3, s, 0.0)  # only confident sound events
+            dist[:, EMOTIONS.index(e)] += CHANNEL_WEIGHT["sounds"] * s
+            weight += CHANNEL_WEIGHT["sounds"] * s
+
+    probs = dist / np.maximum(dist.sum(1, keepdims=True), 1e-9)
+    intensity = np.clip(weight / max(1e-9, sum(CHANNEL_WEIGHT[c] for c in used)), 0, 1)  # how emotional at all
+
+    # arousal: emotion-implied + voice (speech) + acoustic loudness; valence: emotion-implied + voice
+    a_emo = probs @ np.array([AROUSAL[e] for e in EMOTIONS]) * intensity
+    v_emo = probs @ np.array([VALENCE[e] for e in EMOTIONS]) * intensity
+    loud = np.array(_seconds(report["series"].get("loudness_db"), n, -45.0), dtype=float)
+    a_acoustic = np.clip((loud + 45.0) / 40.0, 0, 1)  # -45 dB -> 0, -5 dB -> 1
+    voice = cues.get("voice") or {}
+    va = np.array([x if x is not None else np.nan for x in _seconds(voice.get("arousal"), n)], dtype=float)
+    vv = np.array([x if x is not None else np.nan for x in _seconds(voice.get("valence"), n)], dtype=float)
+    if np.isfinite(va).any():
+        used.append("voice")
+    parts_a = [a_emo, 0.6 * a_acoustic]
+    arousal = np.where(np.isfinite(va), (a_emo + 0.6 * a_acoustic + np.nan_to_num(va)) / 2.6, sum(parts_a) / 1.6)
+    valence = np.where(np.isfinite(vv), (v_emo + (np.nan_to_num(vv) * 2 - 1)) / 2, v_emo)
+    arousal = np.clip(arousal, 0, 1)
+    valence = np.clip(valence, -1, 1)
+    dominant = [EMOTIONS[int(np.argmax(probs[t]))] if intensity[t] > 0.15 else "neutral" for t in range(n)]
+
+    # brain cross-check: does predicted arousal move with TRIBE's cortical salience response?
+    sal = (report["series"].get("network_z") or {}).get("salience")
+    brain_r = None
+    if sal and len(sal) == n and np.std(arousal) > 1e-6 and np.std(sal) > 1e-6:
+        brain_r = round(float(np.corrcoef(arousal, sal)[0, 1]), 3)
+
+    feats = features(arousal, valence, probs, intensity, report)
+    seq, last = [], None
+    for d in dominant:
+        if d != "neutral" and d != last:
+            seq.append(d)
+            last = d
+    block = {
+        "note": "predicted emotion the video evokes for an average viewer; not a measured mood",
+        "channels": used, "brain_salience_r": brain_r,
+        "series": {"arousal": [round(float(x), 3) for x in arousal], "valence": [round(float(x), 3) for x in valence],
+                   "dominant": dominant,
+                   "probs": {e: [round(float(x), 3) for x in probs[:, j]] for j, e in enumerate(EMOTIONS)}},
+        "summary": {"dominant_emotions": _top(dominant), "sequence": seq[:6], **feats,
+                    "peak_moments": _peaks(arousal, dominant)},
+    }
+    return block, {f"emo_{k}": v for k, v in feats.items() if isinstance(v, (int, float))}
+
+
+def features(arousal, valence, probs, intensity, report):
+    import hookline_report as HL
+    n = len(arousal)
+    hs = min(3, n)
+    early_epistemic = float((probs[:hs, EMOTIONS.index("surprise")] + probs[:hs, EMOTIONS.index("curiosity")]).mean()
+                            * intensity[:hs].mean())
+    pk = HL.peak_features([100 * a for a in arousal])
+    att = np.array(report["series"]["attention"], dtype=float)
+    r = float(np.corrcoef(arousal, att)[0, 1]) if np.std(arousal) > 1e-6 and np.std(att) > 1e-6 else 0.0
+    hi = [EMOTIONS.index(e) for e in HIGH_AROUSAL]
+    thirds = [valence[i * n // 3:(i + 1) * n // 3].mean() if n >= 3 else 0.0 for i in range(3)]
+    return {
+        "hook": round(float(arousal[:hs].max() + early_epistemic), 3),             # arousal + surprise/curiosity in 0-3s
+        "peak": round(float((arousal * np.abs(valence)).max()), 3),                 # strongest felt moment
+        "high_arousal_share": round(float(((arousal > 0.6) & (probs[:, hi].sum(1) > 0.5)).mean()), 3),
+        "peaks_per_window": pk["peaks_per_window"], "peak_gap_cv": pk["peak_gap_cv"],
+        "peak_end": round(float(0.5 * arousal.max() + 0.5 * arousal[-3:].mean()), 3),
+        "valence_mean": round(float(valence.mean()), 3),
+        "attention_coupling": round(r, 3),                                          # emotion moves with attention
+        "arc": _arc(thirds),
+    }
+
+
+def _arc(thirds):
+    a, b, c = thirds
+    if max(thirds) - min(thirds) < 0.1:
+        return "flat"
+    if c > a and b <= c:
+        return "rise"
+    if c < a and b >= c:
+        return "fall"
+    return "valley (fall-rise)" if b < min(a, c) else "peak (rise-fall)"
+
+
+def _top(dominant):
+    from collections import Counter
+    c = Counter(d for d in dominant if d != "neutral")
+    total = max(1, len(dominant))
+    return [{"emotion": e, "share": round(k / total, 2)} for e, k in c.most_common(3)]
+
+
+def _peaks(arousal, dominant):
+    import hookline_report as HL
+    idx = HL.attention_peaks([100 * a for a in arousal])
+    return [{"at_s": int(i), "emotion": dominant[i], "arousal": round(float(arousal[i]), 2)} for i in idx[:5]]

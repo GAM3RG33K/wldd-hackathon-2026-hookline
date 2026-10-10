@@ -67,6 +67,15 @@ AST_REPO = "MIT/ast-finetuned-audioset-10-10-0.4593"  # AudioSet classifier for 
 SPEECH_MIN_RATIO = float(os.environ.get("HOOKLINE_SPEECH_MIN", "0.05"))  # share of seconds with speech
 GATE_P = 0.4  # per-second class probability threshold
 # AudioSet labels grouped into what matters for a reel's audio.
+# AudioSet sounds that signal an emotion (per second, from the same AST pass as the speech gate).
+EMO_SOUNDS = {
+    "amusement": ["Laughter", "Giggle", "Chuckle, chortle", "Belly laugh", "Baby laughter", "Snicker"],
+    "awe": ["Cheering", "Applause", "Whoop"],
+    "surprise": ["Gasp"],
+    "tension": ["Screaming"],
+    "sadness": ["Crying, sobbing", "Whimper", "Sigh"],
+}
+EMOTION_ON = os.environ.get("HOOKLINE_EMOTION", "1") != "0"
 AUDIO_GROUPS = {
     "speech": ["Speech", "Male speech, man speaking", "Female speech, woman speaking", "Child speech, kid speaking",
                "Conversation", "Narration, monologue"],
@@ -298,7 +307,7 @@ def speech_gate(job_id: str, video) -> dict:
     sr = 16000
     audio = _load_audio(video, sr)
     n = int(np.ceil(len(audio) / sr)) if len(audio) else 0
-    names = sorted({c for grp in AUDIO_GROUPS.values() for c in grp if c in labels})
+    names = sorted({c for grp in (*AUDIO_GROUPS.values(), *EMO_SOUNDS.values()) for c in grp if c in labels})
     probs = np.zeros((n, len(names)), dtype=np.float32)
     for b0 in range(0, n, 16):
         chunks = [audio[i * sr:(i + 2) * sr] for i in range(b0, min(n, b0 + 16))]
@@ -330,7 +339,10 @@ def speech_gate(job_id: str, video) -> dict:
         decision = "transcript on" if keep else "transcript off"
     else:
         decision = f"transcript {mode} (forced)"
+    sounds = {e: [round(float(v), 3) for v in np.max([col[c] for c in members if c in col], axis=0)]
+              for e, members in EMO_SOUNDS.items() if any(c in col for c in members)}
     gate = {"mode": mode, "decision": decision, "reason": why, "audio_type": atype, "ratios": ratio, "seconds": n,
+            "sounds_per_second": sounds,
             "speech_per_second": [round(float(v), 2) for v in grp["speech"]],
             "vocals_per_second": [round(float(v), 2) for v in grp["vocals"]]}
     j["speech_gate"] = gate
@@ -888,9 +900,22 @@ def _warm_catalog():
         BOOT["trending_catalog"] = f"FAILED {type(e).__name__}: {e}"[:300]
 
 
+def _warm_emotion():
+    if not EMOTION_ON:
+        return
+    try:
+        import emotion as EMO
+        t0 = time.time()
+        EMO.warm(DEVICE)
+        BOOT["emotion_models"] = f"ready ({time.time() - t0:.0f}s)"
+    except Exception as e:  # noqa: BLE001 - jobs retry lazily and log per channel
+        BOOT["emotion_models"] = f"FAILED {type(e).__name__}: {e}"[:300]
+
+
 @app.on_event("startup")
 def _startup():
     threading.Thread(target=_warm_catalog, daemon=True).start()
+    threading.Thread(target=_warm_emotion, daemon=True).start()
     if DEFAULT_ASR == "hinglish":
         threading.Thread(target=_warm_hinglish, daemon=True).start()
     try:  # import check only; the model loads on the first transcription
@@ -980,6 +1005,21 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
             except Exception:  # noqa: BLE001 - logging only
                 counts = {}
             jlog(job_id, f"events ready: {len(events)} rows {counts}, mem {_mem()}")
+            if EMOTION_ON:
+                try:
+                    import emotion as EMO
+                    with timed("events", "emotion"):
+                        gate = j.get("speech_gate") or {}
+                        audio = _load_audio(video)
+                        n = int(np.ceil(len(audio) / 16000)) or int(np.ceil(j["video_s"]))
+                        sp = gate.get("speech_per_second") or [0.0] * n
+                        segs = j.get("transcript_segments") if j["modalities"].get("text") else []
+                        j["emotion"] = EMO.emotion_cues(video, audio, 16000, sp, segs or [], DEVICE,
+                                                        log=lambda m: jlog(job_id, f"  {m}"))
+                except JobCancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 - emotion is additive, never fatal
+                    jlog(job_id, f"  emotion cues failed ({type(e).__name__}: {e})")
             set_step(job_id, "predict")
             t1 = time.time()
             n_before = len(j.get("substeps", []))
@@ -1042,7 +1082,8 @@ def _space_extra(job_id):
             "transcript_info": jj.get("transcript"), "transcript_segments": jj.get("transcript_segments"),
             "transcript_dropped": jj.get("transcript_dropped"),
             "audio_match": {"song": am.get("song"), "reuse": am.get("reuse", [])},
-            "text_mode": jj.get("text_mode"), "lang": jj.get("lang"), "asr": jj.get("asr")}
+            "text_mode": jj.get("text_mode"), "lang": jj.get("lang"), "asr": jj.get("asr"),
+            "emotion": jj.get("emotion")}
 
 
 def _write_outputs(job_id, job, video, source_name, preds, segments):
