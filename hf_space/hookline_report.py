@@ -75,6 +75,19 @@ def fmt(t):
     return f"{int(t) // 60}:{int(t) % 60:02d}"
 
 
+# Viral-potential tiers (uncalibrated until VIRALITY_MODEL is fitted on the sample corpus).
+VIRALITY_TIERS = [(35, "Low reach"), (55, "Average"), (70, "Above average"), (85, "Popular"),
+                  (101, "Viral potential")]
+# Written by tribe/fit_virality.py (logistic fit: known-viral outliers vs low-view reels).
+# Missing file = interim heuristic below.
+_VM = Path(__file__).with_name("virality_model.json")
+VIRALITY_MODEL = json.loads(_VM.read_text()) if _VM.exists() else None
+
+
+def virality_tag(score):
+    return next(name for cut, name in VIRALITY_TIERS if score < cut)
+
+
 def band(score):
     return ("Bad" if score < 30 else "Weak" if score < 50 else "Average" if score < 70
             else "Strong" if score < 85 else "Viral-grade")
@@ -286,15 +299,47 @@ def analyse(out_dir, video=None):
         recs.append({"at": f"{fmt(T - 3)}-{fmt(T)}", "issue": "weak ending",
                      "fix": "End on a payoff or loop back to the opening so viewers rewatch."})
 
-    virality = float(0.45 * hook + 0.30 * min(hold, 100) + 0.25 * A.mean())
+    # -- raw features, comparable ACROSS videos (inputs for the virality fit; never account data)
+    drop_share = float(sum(b - a for a, b in drops) / T)
+    eng_raw = (np.mean([net_t[g] for g in ("visual", "auditory", "language", "attention")], axis=0)
+               - 0.5 * net_t["default_mode"]) if "visual" in net_t else net_t["cortex"]
+    features = {
+        "hook": round(hook, 2),
+        "engagement_raw": round(float(eng_raw.mean()), 5),          # absolute TRIBE engagement level
+        "hook_lift": round(float((eng_raw[:hs].mean() - eng_raw.mean()) / (eng_raw.std() + 1e-9)), 3),
+        "peak_share": round(float((A >= 70).mean()), 3),            # seconds at strong attention
+        "drop_share": round(drop_share, 3),                         # seconds inside drop zones
+        "ending": round(float(A[-3:].mean()), 2),
+        "volatility": round(float(np.abs(np.diff(A)).mean()), 2) if T > 1 else 0.0,
+        "cuts_per_s": round(len(cuts) / max(dur, 1e-6), 3),
+        "motion": round(float(np.mean(motion)), 4),
+        "loudness_db": round(float(np.mean(np.maximum(db, CFG["silence_db"]))), 2),
+        "words_per_s": round(float(words_ps.sum() / max(dur, 1e-6)), 3) if speech_known else None,
+        "duration_s": round(dur, 2),
+        **{f"net_{g}": round(float(v.mean()), 5) for g, v in net_t.items()},
+    }
+    if VIRALITY_MODEL:
+        m = VIRALITY_MODEL
+        z = m["bias"] + sum(w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k])
+                            for k, w in m["weights"].items())
+        virality = float(100 * sigmoid(z))
+        virality_method = m["label"]
+    else:
+        # Interim, uncalibrated: no constant term (avg attention is ~50 by design) and no
+        # length penalty (hold). Hook, how much of the video avoids drops, strong moments, ending.
+        virality = float(0.40 * hook + 0.25 * (1 - drop_share) * 100
+                         + 0.20 * min(100.0, 200 * features["peak_share"]) + 0.15 * features["ending"])
+        virality_method = "interim heuristic, uncalibrated (hook, drop-free share, strong moments, ending)"
     result = {
         "video": str(video), "duration_s": round(dur, 2), "method": "heuristic, within-video normalised, uncalibrated",
         "scores": {
             "hook_pct": round(hook, 1), "hook_band": band(hook),
             "hold_rate_pct": round(min(hold, 100), 1), "finish_pct": round(finish, 1),
             "avg_attention": round(float(A.mean()), 1), "virality": round(virality, 1),
-            "virality_band": band(virality),
+            "virality_band": band(virality), "virality_tag": virality_tag(virality),
+            "virality_method": virality_method,
         },
+        "features": features,
         "moments": {
             "peak_hook_at_s": peak_hook_t, "peak_attention_at_s": peak_t,
             "strongest_window_s": [strongest, strongest + win], "weakest_window_s": [weakest, weakest + win],
@@ -316,7 +361,8 @@ def write_md(r, path):
              f"- **Hook score:** {s['hook_pct']}% ({s['hook_band']})",
              f"- **Hold rate:** {s['hold_rate_pct']}% of hooked viewers stay to the end",
              f"- **Finish rate:** {s['finish_pct']}%",
-             f"- **Virality score:** {s['virality']} ({s['virality_band']})", "",
+             f"- **Viral potential:** {s['virality']} ({s.get('virality_tag', s['virality_band'])}; "
+             f"{s.get('virality_method', 'uncalibrated')})", "",
              f"Peak hook at {fmt(m['peak_hook_at_s'])}. Strongest window {fmt(m['strongest_window_s'][0])}-{fmt(m['strongest_window_s'][1])}, "
              f"weakest {fmt(m['weakest_window_s'][0])}-{fmt(m['weakest_window_s'][1])}.", "", "## What to change", ""]
     for x in r["recommendations"]:

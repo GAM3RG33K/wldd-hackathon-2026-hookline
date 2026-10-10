@@ -373,12 +373,14 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
 {tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}
 {tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
-{tile('Virality', f"{s['virality']:.0f}", s['virality_band'])}
+{tile('Viral potential', f"{s['virality']:.0f}", s.get('virality_tag', s['virality_band']))}
 </div>
 <div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}</div></div>
 {_transcript_html(r)}
 <h2>What to change</h2><ul>{recs}</ul>
 {png_html}
+<p class=muted>Viral potential: {html.escape(s.get('virality_method', 'legacy formula'))}.
+Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored within the video).</p>
 <p><i>{html.escape(r['method'])}</i> · neural_source={html.escape(str(r.get('neural_source', '?')))}</p>
 <p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a></p>
 <script>

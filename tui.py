@@ -41,7 +41,8 @@ BACKEND = "http://localhost:8000"
 SPACE = os.environ.get("HOOKLINE_SPACE_URL", "https://wlddhq-hookline-tribe.hf.space")
 STRATA = ("face", "faceless", "outliers")
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm")
-BAND_STYLE = {"Bad": "red", "Weak": "yellow", "Average": "cyan", "Strong": "green", "Viral-grade": "green"}
+BAND_STYLE = {"Bad": "red", "Weak": "yellow", "Average": "cyan", "Strong": "green", "Viral-grade": "green",
+              "Low reach": "red", "Above average": "green", "Popular": "green", "Viral potential": "bold green"}
 BLOCKS = " ▁▂▃▄▅▆▇█"
 POLL_S = 1.0  # Space progress poll interval; /jobs is an in-memory lookup, cheap to hit
 
@@ -488,7 +489,7 @@ class Hookline(App):
         tile("hook", "HOOK", f"{s['hook_pct']:.0f}", s.get("hook_band", ""))
         tile("hold", "HOLD", f"{s['hold_rate_pct']:.0f}%")
         tile("finish", "FINISH", f"{s['finish_pct']:.0f}%")
-        tile("virality", "VIRALITY", f"{s['virality']:.0f}", s.get("virality_band", ""))
+        tile("virality", "VIRAL POTENTIAL", f"{s['virality']:.0f}", s.get("virality_tag", s.get("virality_band", "")))
         self.query_one("#strip", AttentionStrip).show(r)
         m = r["moments"]
         sw, ww = m["strongest_window_s"], m["weakest_window_s"]

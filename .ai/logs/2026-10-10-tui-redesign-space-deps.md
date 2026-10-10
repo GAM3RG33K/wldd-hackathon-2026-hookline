@@ -207,3 +207,21 @@
 - Demo cleanup: backend/out reduced to demo/ only (removed 12 preview jobs, 27 s-* reports
   and the summary files), plus tribe/__pycache__ and .DS_Store files. The backend on :8000 was
   restarted with HF_TOKEN + HOOKLINE_SPACE_URL. The demo report plays tribe/samples/sneaker.mp4.
+
+## Virality: why 52, interim fix, calibration run
+- The old formula was 0.45*hook + 0.30*hold + 0.25*avg attention. Avg attention is ~50 by design
+  (normalised within the video), so a quarter of the score was a constant (~12.5). Hold multiplies
+  a 93-99.5% per-second keep rate, so long reels are penalised whatever their content.
+- Interim (uncalibrated): 0.40 hook + 0.25 drop-free share + 0.20 strong-moment share
+  (A>=70, x2, capped) + 0.15 ending. Tags: Low reach <35, Average <55, Above average <70,
+  Popular <85, Viral potential. The screenshot reel (2cf9e419 preview) goes 52 -> 60
+  "Above average".
+- Every report now has a `features` block that is comparable across videos: raw TRIBE
+  engagement, hook lift, peak/drop share, ending, volatility, cuts/s, motion, loudness,
+  words/s, duration, raw network means. tribe/fit_virality.py fits viral outliers (label 1)
+  vs lowest-view reels (label 0) on those features: Cohen's d per feature, L2 logistic
+  regression on the top 5, leave-one-out accuracy. It writes tribe/virality_model.json,
+  which hookline_report loads automatically. Account data is used only to pick the groups.
+- Calibration batch: OL001-OL010 (10M-315M views), then the 10 lowest-view face/faceless reels
+  FL019, FC021, FL024, FC046, FC040, FL028, FC037, FC019, FC045, FC039 (2k-12k views), labelled
+  [i/20] in one sequential chain.
