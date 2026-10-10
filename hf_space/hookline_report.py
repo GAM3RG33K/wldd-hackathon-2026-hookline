@@ -123,6 +123,9 @@ def peak_features(attention):
             "peak_gap_cv": round(float(gaps.std() / gaps.mean()), 3) if len(gaps) and gaps.mean() else 1.0}
 
 
+EMO_LIFT = 0.5  # emotional strength 100 closes half the gap to 100 (no penalty without strong peaks yet)
+
+
 def virality_tag(score):
     return next(name for cut, name in VIRALITY_TIERS if score < cut)
 
@@ -443,6 +446,14 @@ def finalize(report, extra):
     if block:
         report["emotion"] = block
         report.setdefault("features", {}).update(efeat)
+        strength = block["strong"]["score"]
+        sc = report["scores"]
+        sc["emotional_strength"] = strength
+        if not VIRALITY_MODEL:  # interim: strong emotional peaks lift viral potential toward 100
+            base = sc["virality"]
+            v = base + EMO_LIFT * (strength / 100.0) * (100 - base)
+            sc.update(virality_base=base, virality=round(v, 1), virality_band=band(v), virality_tag=virality_tag(v),
+                      virality_method=sc.get("virality_method", "") + f"; + strong-emotion lift ({strength:.0f}/100)")
     report["suggestions"] = SG.suggest(report)
     return report
 

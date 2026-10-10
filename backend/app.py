@@ -229,6 +229,8 @@ def _chart_svg(r: dict) -> str:
     peak_lbl = f'<span class="pk" style="left:{100 * (pk + 0.5) / T:.2f}%">peak {_fmt_t(pk)}</span>' if pk is not None else ""
     dots = ""
     em = r.get("emotion")
+    strong_at = {t: m["emotion"] for m in ((em or {}).get("strong") or {}).get("moments", [])
+                 for t in range(m["start"], m["end"])}
     if em:  # emotion dots sit on the attention curve: colour = emotion, size = arousal
         s_ = em["series"]
         for i, (d, a_) in enumerate(zip(s_["dominant"], s_["arousal"])):
@@ -236,7 +238,9 @@ def _chart_svg(r: dict) -> str:
                 continue
             size = 6 + 10 * float(a_)
             y = 100 - max(0, min(100, att[i]))
-            dots += (f'<i class=edot data-s="{i}" data-label="{_fmt_t(i)} · {d} · arousal {a_:.2f}" '
+            strong_d = strong_at.get(i)
+            dots += (f'<i class="edot{" strong" if strong_d else ""}" data-s="{i}" '
+                     f'data-label="{_fmt_t(i)} · {strong_d + " (strong)" if strong_d else d}" '
                      f'title="{_fmt_t(i)} {d} (arousal {a_:.2f})" style="left:{100 * (i + 0.5) / T:.2f}%;'
                      f'top:{y:.2f}%;width:{size:.0f}px;height:{size:.0f}px;background:{EMO_COLORS.get(d, "#888")}"></i>')
     title = html.escape(f"Attention per second, {T}s")
@@ -384,7 +388,18 @@ def _emotion_html(r: dict) -> str:
     legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e}</span>' for e, c in EMO_COLORS.items()
                      if e != "neutral")
     br = em.get("brain_salience_r")
+    st = em.get("strong") or {}
+    if st:
+        parts = [f'{e} {d}s' for e, d in (st.get("durations_s") or {}).items() if d]
+        strong_line = (f'<p><b>Strong emotions</b> (peaks of laughter, awe, outrage, sorrow): '
+                       f'{html.escape(", ".join(parts)) if parts else "none detected"} · '
+                       f'{st.get("seconds", 0)}s of {T}s ({st.get("share", 0):.0%}) → '
+                       f'<b>emotional strength {st.get("score", 0):.0f}/100</b>'
+                       f'{" · moments " + html.escape(", ".join(_fmt_t(m["start"]) + "-" + _fmt_t(m["end"]) + " " + m["emotion"] for m in st.get("moments", [])[:5])) if st.get("moments") else ""}</p>')
+    else:
+        strong_line = ""
     return f"""<div class=emo><div class=band title="emotion per second (colour = emotion, strength = arousal)">{cells}</div>
+{strong_line}
 <p><b>Emotion</b> (predicted, evoked for an average viewer): {html.escape(dom)} ·
 sequence {html.escape(" → ".join(sm.get("sequence", [])) or "-")} · arc {html.escape(sm.get("arc", "-"))} ·
 high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)}</p>
@@ -576,6 +591,7 @@ details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;marg
 .playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
 .edots .edot{{position:absolute;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid var(--bg);
   box-shadow:0 0 0 1px rgba(0,0,0,.25);cursor:default}}
+.edots .edot.strong{{box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--fg)}}
 .edots .edot.on{{transform:translate(-50%,-50%) scale(1.6);z-index:2}}
 .etip{{position:absolute;transform:translate(-50%,calc(-100% - 14px));padding:3px 8px;border-radius:6px;font-size:.75rem;
   white-space:nowrap;background:var(--fg);color:var(--bg);pointer-events:none;z-index:3}}
@@ -620,12 +636,12 @@ Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored 
     ph.hidden = false; ph.style.left = Math.min(100, 100 * v.currentTime / T) + "%";
     // emotion label when the playhead reaches a dot
     const d = dots[Math.floor(v.currentTime)];
-    if (lit && lit !== d) lit.classList.remove("on");
+    if (lit && lit !== d) {{ lit.classList.remove("on"); lit = null; }}
     if (d && tip) {{
       d.classList.add("on"); lit = d;
       tip.textContent = d.dataset.label; tip.style.left = d.style.left; tip.style.top = d.style.top;
       tip.style.background = d.style.background; tip.hidden = false;
-    }} else if (tip) {{ tip.hidden = true; lit = null; }}
+    }} else if (tip) {{ tip.hidden = true; }}
   }};
   // playback and scrubbing (a paused seek fires 'seeked', not 'timeupdate')
   if (v && ph) ["timeupdate", "seeked"].forEach(ev => v.addEventListener(ev, sync));

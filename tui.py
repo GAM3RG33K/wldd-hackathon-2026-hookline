@@ -626,6 +626,12 @@ class Hookline(App):
             moments.append(dom, "bold magenta")
             moments.append(f" · arc {sm.get('arc')} · high-arousal {sm.get('high_arousal_share', 0):.0%}"
                            f" · peaks {pk}", "magenta")
+            st = em.get("strong") or {}
+            if st:
+                parts = ", ".join(f"{e} {d}s" for e, d in (st.get("durations_s") or {}).items() if d) or "none"
+                moments.append("\nstrong emotions: ", "dim")
+                moments.append(f"{parts} · {st.get('share', 0):.0%} of the reel · emotional strength "
+                               f"{st.get('score', 0):.0f}/100", "bold")
         self.query_one("#moments", Static).update(moments)
         tbl = Table(expand=True, box=None, show_header=True, header_style="dim", pad_edge=False)
         tbl.add_column("AT", style="bold green", no_wrap=True, width=10)

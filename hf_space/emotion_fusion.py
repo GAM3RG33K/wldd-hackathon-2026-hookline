@@ -119,7 +119,69 @@ def fuse(report, extra):
         "summary": {"dominant_emotions": _top(dominant), "sequence": seq[:6], **feats,
                     "peak_moments": _peaks(arousal, dominant)},
     }
-    return block, {f"emo_{k}": v for k, v in feats.items() if isinstance(v, (int, float))}
+    strong = strong_emotions(extra, n)
+    block["strong"] = strong
+    feats_out = {f"emo_{k}": v for k, v in feats.items() if isinstance(v, (int, float))}
+    feats_out.update(emo_strong_share=strong["share"], emo_strength=strong["score"])
+    return block, feats_out
+
+
+# Strong emotions = intense PEAKS of awe, laughter, outrage/anger, sorrow (not tone, not mild feelings).
+STRONG = {"laughter": "amusement", "awe": "awe", "outrage": "outrage", "sorrow": "sadness"}
+STRONG_LEVEL = 0.6       # absolute evidence needed at the peak (0..1)
+STRONG_PROMINENCE = 0.15  # must spike above its surroundings: a flat plateau (steady tone) never counts
+STRONG_DROP = 0.15        # a peak lasts while evidence stays within this of the peak
+STRONG_FULL = 0.30        # strong peaks covering 30% of the reel = emotional strength 100
+VISUAL_STRONG_WEIGHT = 0.5  # visual alone (mostly scene tone) can't reach STRONG_LEVEL
+
+
+def strong_emotions(extra, n):
+    """Per strong emotion, an evidence curve from the channels that fit it; peaks -> moments."""
+    from scipy.signal import find_peaks
+    em = (extra or {}).get("emotion") or {}
+    snd = ((extra or {}).get("speech_gate") or {}).get("sounds_per_second") or {}
+    vis = em.get("visual") or {}
+    text = (em.get("text") or {}).get("probs") or []
+
+    def ser(x, d=0.0):
+        return np.array([(d if v is None else v) for v in (list(x or []) + [d] * n)[:n]], dtype=float)
+
+    txt = {e: np.clip(np.array([sum((d or {}).get(k, 0) * w for k, w in GO_MAP[e].items()) if d else 0.0
+                                for d in (list(text) + [None] * n)[:n]]), 0, 1) for e in EMOTIONS}
+    voice = ser((em.get("voice") or {}).get("arousal"))
+    evidence = {}
+    for s, base in STRONG.items():
+        parts = [VISUAL_STRONG_WEIGHT * ser(vis.get(base)), txt[base]]
+        if s == "laughter":
+            parts += [ser(snd.get("amusement")), 0.6 * txt[base] + 0.4 * voice]   # laughter sounds; funny line, lively voice
+        elif s == "awe":
+            parts += [ser(snd.get("awe"))]                                         # cheering / applause
+        elif s == "outrage":
+            parts += [0.6 * txt[base] + 0.4 * voice]                               # angry words, raised voice
+        elif s == "sorrow":
+            parts += [ser(snd.get("sadness"))]                                     # crying, sighs
+        evidence[s] = np.clip(np.max(parts, axis=0), 0, 1)
+    moments = []
+    for s, x in evidence.items():
+        idx, _ = find_peaks(x, prominence=STRONG_PROMINENCE)
+        for p in idx:
+            if x[p] < STRONG_LEVEL:
+                continue
+            thr = max(STRONG_LEVEL, x[p] - STRONG_DROP)
+            a = b = int(p)
+            while a > 0 and x[a - 1] >= thr:
+                a -= 1
+            while b < n - 1 and x[b + 1] >= thr:
+                b += 1
+            moments.append({"emotion": s, "start": a, "end": b + 1, "peak_at": int(p), "level": round(float(x[p]), 2)})
+    seconds = sorted({t for m in moments for t in range(m["start"], m["end"])})
+    durations = {s: sum(m["end"] - m["start"] for m in moments if m["emotion"] == s) for s in STRONG}
+    share = len(seconds) / max(n, 1)
+    return {"moments": sorted(moments, key=lambda m: m["start"]), "durations_s": durations,
+            "seconds": len(seconds), "share": round(share, 3),
+            "score": round(100 * min(1.0, share / STRONG_FULL), 1),
+            "max_evidence": {s: round(float(v.max()), 2) for s, v in evidence.items()},
+            "definition": "peaks of laughter, awe, outrage/anger, sorrow; steady tone does not count"}
 
 
 def features(arousal, valence, probs, intensity, report):
