@@ -31,9 +31,10 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Footer, Input, Static, Tree
+from textual.widgets import Button, Footer, Input, Static, TextArea, Tree
 
 ROOT = Path(__file__).parent.resolve()
 SAMPLES = ROOT / "samples"
@@ -445,35 +446,63 @@ class SpaceScreen(ModalScreen):
         self.app.space_action(verb, self)
 
 
+class CaptionArea(TextArea):
+    """Multi-line caption field with wrapping: Enter submits; pasted line breaks are kept."""
+
+    class Submitted(Message):
+        pass
+
+    async def _on_key(self, event):
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted())
+            return
+        await super()._on_key(event)
+
+
 class CaptionPrompt(ModalScreen):
-    """Optional caption before an analysis. Enter = go (empty = no caption), Esc = cancel the run."""
+    """Optional caption before an analysis. Enter = go (empty = no caption), Esc = cancel / just the report."""
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
     DEFAULT_CSS = """
     CaptionPrompt { align: center middle; }
     CaptionPrompt > Vertical { width: 84; height: auto; border: round $accent; padding: 1 2; background: $panel; }
-    CaptionPrompt Input { margin-top: 1; }
+    CaptionPrompt CaptionArea { margin-top: 1; height: 7; }
+    CaptionPrompt #cap-count { height: 1; color: $text-muted; text-align: right; }
     """
+    MAX = 2200  # Instagram's caption limit (the Space truncates beyond it)
 
-    def __init__(self, name, prefill=""):
+    def __init__(self, name, prefill="", esc_hint="cancels"):
         super().__init__()
-        self.reel, self.prefill = name, prefill
+        self.reel, self.prefill, self.esc_hint = name, prefill, esc_hint
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(Text.assemble(("Caption for ", ""), (self.reel, "bold"), (" (optional)\n", ""),
-                                       ("Paste the post caption, or leave it empty and press Enter.\n"
-                                        "It is only used if it describes this video (checked against its frames and "
-                                        "speech);\nan unrelated or filler caption is ignored. Esc cancels.", "dim")))
-            yield Input(value=self.prefill, placeholder="e.g. Rs 200 ka cleaning hack jo har ghar mein hona chahiye")
+                                       ("Paste the post caption, or leave it empty. It is only used if it describes this "
+                                        "video (checked against its frames and speech); an unrelated or filler caption "
+                                        f"is ignored. Enter analyzes on the GPU, Esc {self.esc_hint}.", "dim")))
+            yield CaptionArea(self.prefill, soft_wrap=True, show_line_numbers=False, highlight_cursor_line=False,
+                              placeholder="e.g. Rs 200 ka cleaning hack jo har ghar mein hona chahiye #amazonfinds")
+            yield Static(id="cap-count")
 
     def on_mount(self):
         self.query_one(Vertical).border_title = "Analyze"
-        self.query_one(Input).focus()
+        area = self.query_one(CaptionArea)
+        area.focus()
+        area.move_cursor(area.document.end)
+        self.count()
 
-    @on(Input.Submitted)
-    def done(self, ev: Input.Submitted):
-        self.dismiss(ev.value.strip())
+    @on(TextArea.Changed)
+    def count(self, _=None):
+        n = len(self.query_one(CaptionArea).text)
+        self.query_one("#cap-count", Static).update(
+            Text(f"{n}/{self.MAX}", "bold red" if n > self.MAX else "dim"))
+
+    @on(CaptionArea.Submitted)
+    def done(self, _):
+        self.dismiss(self.query_one(CaptionArea).text.strip()[:self.MAX])
 
 
 class RunOptions(ModalScreen):
@@ -545,12 +574,15 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
 
 [b]Try it in 3 steps[/b]
   1. Pick a reel on the left (↑/↓; Enter opens a folder), or press [b]o[/b] to pick your own video
-  2. A saved report opens on its own. No report yet? Press [b]a[/b] to analyze it on the GPU
+  2. A saved report opens as you move onto a reel. [b]Enter[/b] (or [b]a[/b]) asks for an optional caption
+     and analyzes it on the GPU; Esc in the caption box just shows the saved report
   3. Read the scores, viral-potential tag and the attention chart
 
 [b]Keys[/b]
-  Enter p  open the reel's saved report (nothing is analysed; new reports come from a)
-  a        analyze: full TRIBE brain model on the GPU Space (minutes), builds the report.
+  Enter    caption box -> analyze (re-analyze) on the GPU; Esc in the box opens the saved report
+  p        open the reel's saved report (nothing is analysed)
+  a        analyze: caption box, then the full TRIBE run on the GPU Space (minutes); the report
+           replaces the old one. With the Space paused the run waits and starts once it is live.
            While a run is going, a (or picking a file with o) queues the video; it starts
            when the current run ends. Works on reels, your files and saved reports
   o        pick your own video (system file picker); analysis starts right away
@@ -563,7 +595,8 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
            Transcript auto: a speech gate checks how much of the reel is speech; songs
            and humming are scored on visuals + sound, not words
   S        GPU Space: live status, ping / start / restart / stop (stop + restart ask twice)
-  x        stop the running Space job, or remove the selected video from the queue
+  x        stop a Space job: the one selected under "live on Space", or this session's run,
+           or (press twice) the only job on the Space started elsewhere; on a queued video, unqueue it
   ctrl+r   restart the running Space job (no re-upload, model stays loaded)
   tab      switch between reels and report
   ?        this help        q  quit
@@ -711,6 +744,7 @@ class Hookline(App):
         if not force and sig == self._saved_sig:
             return
         self._saved_sig = sig
+        keep = self.cursor_snapshot()
         self.saved_node.remove_children()
         index = {}  # reel name (lowercase file stem) -> (is_full, job); newest first, full TRIBE wins
         for p in paths:
@@ -735,6 +769,7 @@ class Hookline(App):
                 continue
             self.saved_node.add_leaf(label, data={"kind": "saved", "job": p.parent.name})
         self.report_index = {k: job for k, (_, job) in index.items()}
+        self.cursor_restore(keep)
         self.saved_node.set_label(f"saved reports ({len(self.saved_node.children)})")
 
     def tick_saved(self):
@@ -767,23 +802,71 @@ class Hookline(App):
             j = next((x for x in active if x["job_id"] == node.data.get("sid")), None)
             if j:
                 node.set_label(self._live_label(j))
-        if sig != self._live_sig and {j["job_id"] for j in active} != {n.data.get("sid") for n in self.live_node.children}:
-            self.live_node.remove_children()
+        ids = {j["job_id"] for j in active}
+        have = {n.data.get("sid"): n for n in self.live_node.children}
+        if ids != set(have):  # add / remove only what changed, and keep the cursor where it was
+            keep = self.cursor_snapshot()
+            for sid, node in have.items():
+                if sid not in ids:
+                    node.remove()
             for j in active:
-                self.live_node.add_leaf(self._live_label(j), data={"kind": "live", "sid": j["job_id"],
-                                                                   "source": j.get("source")})
+                if j["job_id"] not in have:
+                    self.live_node.add_leaf(self._live_label(j), data={"kind": "live", "sid": j["job_id"],
+                                                                       "source": j.get("source")})
+            self.cursor_restore(keep)
         self._live_sig = sig
         self.live_node.set_label(f"live on Space ({len(active)})")
         self.update_queue_label()
 
     def _live_label(self, j):
         src = Path(j.get("source") or j["job_id"]).stem
-        t = Text(f"{src:<7}")
+        t = Text(src if len(src) <= 24 else src[:23] + "…", "bold")
+        t.append("  ·  ", "dim")
         if j.get("status") == "queued":
             t.append("queued", "yellow")
         else:
             t.append(f"{j.get('stage', '?')} {fmt_dur(j.get('age_s'))}", "cyan")
         return t
+
+    def focus_node(self, node):
+        """Put the cursor on a node that was just added or expanded: its line only exists after the next
+        refresh (moving earlier leaves the cursor on line 0, the top of the panel)."""
+        tree = self.query_one("#reels", Tree)
+
+        def go():
+            if node.line >= 0:
+                tree.move_cursor(node)
+                tree.scroll_to_node(node, animate=False)
+        self.call_after_refresh(go)
+
+    # ---- keep the tree cursor and scroll steady while live / saved lists change underneath it
+    @staticmethod
+    def _node_key(node):
+        d = (node.data or {}) if node else {}
+        return (d.get("kind"), d.get("path") or d.get("job") or d.get("sid") or str(node.label) if node else None)
+
+    def cursor_snapshot(self):
+        tree = self.query_one("#reels", Tree)
+        return self._node_key(tree.cursor_node), tree.scroll_y
+
+    def cursor_restore(self, snap):
+        key, scroll_y = snap
+        tree = self.query_one("#reels", Tree)
+
+        def restore():
+            found, stack = None, list(tree.root.children)
+            while stack and not found:
+                n = stack.pop(0)
+                if self._node_key(n) == key:
+                    found = n
+                stack.extend(n.children)
+            if found is not None and found.line >= 0 and found is not tree.cursor_node:
+                self._restoring = True
+                tree.cursor_line = found.line
+                tree.call_after_refresh(setattr, self, "_restoring", False)
+            tree.scroll_to(y=scroll_y, animate=False)
+
+        self.call_after_refresh(restore)
 
     def show_live_progress(self, sid, p):
         if self.watch_live != sid:
@@ -917,7 +1000,11 @@ class Hookline(App):
         em = r.get("emotion")
         if em:
             sm = em["summary"]
-            dom = ", ".join(f"{x['emotion']} {x['share']:.0%}" for x in sm.get("dominant_emotions", [])) or "neutral"
+            dom = ", ".join(f"{x['emotion']} {x['share']:.0%}" for x in sm.get("dominant_emotions", [])) or "no clear emotion"
+            if sm.get("no_clear_share") is not None:
+                dom += f" · no clear {sm['no_clear_share']:.0%}"
+            if sm.get("confidence") not in (None, "none"):
+                dom += f" · confidence {sm['confidence']}"
             pk = ", ".join(f"{fmt_t(p['at_s'])} {p['emotion']}" for p in sm.get("peak_moments", [])) or "none"
             moments.append("\nemotion: ", "dim")
             moments.append(dom, "bold magenta")
@@ -974,12 +1061,14 @@ class Hookline(App):
             (f"{views}{short_path(d['path'])}\n", "dim"),
             ("Views and page size are context only; scoring judges the video, never the account.\n\n", "dim italic"),
             ("No report yet for this reel.\n", "bold yellow"),
-            ("a", "bold"), "          analyze it: full TRIBE brain model on the GPU Space (minutes)\n",
+            ("Enter / a", "bold"), "  caption (optional), then analyze: full TRIBE on the GPU Space (minutes)\n",
             ("m", "bold"), "          run options: video / audio / transcript, language\n",
             ("S", "bold"), "          GPU Space status (start it here if it is paused)"))
 
     @on(Tree.NodeHighlighted)
     def highlighted(self, ev: Tree.NodeHighlighted):
+        if getattr(self, "_restoring", False):  # cursor put back after a list refresh: nothing changed for the user
+            return
         d = ev.node.data or {}
         self.watch_live = d.get("sid") if d.get("kind") == "live" else None
         self.watch_source = d.get("source")
@@ -1019,8 +1108,10 @@ class Hookline(App):
 
     @on(Tree.NodeSelected)
     def selected(self, ev: Tree.NodeSelected):
+        """Enter on a reel or file: caption box -> (re-)analyze; Esc in the box opens the saved report."""
         if (ev.node.data or {}).get("kind") in ("reel", "file"):
-            self.action_preview()
+            self.current = ev.node.data
+            self.action_full(from_select=True)
 
     # ---- actions
     def target(self):
@@ -1062,20 +1153,24 @@ class Hookline(App):
             self.show_reel_card(d)
             self.say(f"No report for {d['id']} yet. Press a to analyze it and build the report.", "yellow")
 
-    def action_full(self):
+    def action_full(self, from_select=False):
+        """a / Enter / file pick: ask for the optional caption, then analyze (queued when busy or paused).
+        from_select: Esc in the caption box opens the saved report instead of just cancelling."""
         d = self.target()
         if not d:
             return
         if not self.token:
             self.say("No HF token: run `hf auth login` or export HF_TOKEN, then restart.", "yellow")
+            if from_select:
+                self.action_preview()
             return
+        self.push_screen(CaptionPrompt(d["id"], self.last_caption(d), esc_hint="opens the saved report"
+                                       if from_select else "cancels"),
+                         lambda cap: self.analyze_with(d, cap, from_select))
+
+    def space_down(self):
         stage = self.space_rt.get("stage")
-        busy = self.space_run or self.queue
-        if not busy and (stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR")):
-            word = STAGE_VIEW.get(stage, ("", (stage or "").lower(), ""))[1]
-            self.say(f"GPU Space is {word}: press S to start it, then a to analyze {d['id']}.", "yellow")
-            return
-        self.push_screen(CaptionPrompt(d["id"], self.last_caption(d)), lambda cap: self.analyze_with(d, cap))
+        return stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR")
 
     def last_caption(self, d):
         """Prefill: the caption this video was analysed with last time, if any."""
@@ -1085,12 +1180,15 @@ class Hookline(App):
         except (OSError, ValueError):
             return ""
 
-    def analyze_with(self, d, caption):
+    def analyze_with(self, d, caption, from_select=False):
         if caption is None:
-            self.say(f"Analysis of {d['id']} cancelled.", "dim")
+            if from_select:
+                self.action_preview()  # Esc: just look at the saved report (or the "no report yet" card)
+            else:
+                self.say(f"Analysis of {d['id']} cancelled.", "dim")
             return
         opts = {"mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang, "caption": caption}
-        if self.space_run or self.queue:
+        if self.space_run or self.queue or self.space_down():
             self.enqueue(d, opts)
             return
         if self.report_for(d):
@@ -1105,8 +1203,13 @@ class Hookline(App):
             self.say(f"{d['id']} is already " + (f"queued (#{pos})." if pos else "being analyzed."), "yellow")
             return
         self.queue.append({"d": d, **opts})
-        now = self.space_run["d"]["id"] if self.space_run else "the current run"
-        self.say(f"Queued {d['id']} (#{len(self.queue)}): starts after {now}. x on a queued item removes it.", "cyan")
+        if self.space_run:
+            when = f"starts after {self.space_run['d']['id']}"
+        elif self.space_down():
+            when = "the GPU Space is not running: press S to start it, the run starts by itself once it is live"
+        else:
+            when = "starts after the current run"
+        self.say(f"Queued {d['id']} (#{len(self.queue)}): {when}. x on a queued item removes it.", "cyan")
         self.update_queue_label()
 
     def update_queue_label(self):
@@ -1122,9 +1225,9 @@ class Hookline(App):
         if self.space_run or not self.queue:
             return
         stage = self.space_rt.get("stage")
-        if stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR"):
-            self.say(f"{len(self.queue)} queued, but the GPU Space is {stage.lower()}: press S to start it, "
-                     "then a to resume the queue.", "yellow")
+        if self.space_down():
+            self.say(f"{len(self.queue)} queued, but the GPU Space is {str(stage).lower()}: press S to start it; "
+                     "the queue resumes by itself once it is live.", "yellow")
             return
         q = self.queue.pop(0)
         self.update_queue_label()
@@ -1377,6 +1480,14 @@ class Hookline(App):
         self.say(f"Transcription language: {what}" + ("" if self.mods["text"] else " (turn transcript on in run options, m)"))
 
     def action_stop(self):
+        """x: remove the selected video from the queue, or stop a Space job: the one selected under
+        "live on Space", else this session's run, else the only job running on the Space (any client:
+        batch scripts, a previous TUI session) after a second press."""
+        node = self.query_one("#reels", Tree).cursor_node
+        sel = (node.data or {}) if node else {}
+        if sel.get("kind") == "live":  # explicit choice in the tree
+            self.space_call("cancel", sel["sid"])
+            return
         d = self.current
         if d and d.get("kind") == "saved":
             d = self.video_of_report(d["job"])
@@ -1387,13 +1498,28 @@ class Hookline(App):
             self.say(f"Removed {d['id']} from the queue ({len(self.queue)} left).", "yellow")
             return
         run = self.space_run
-        if not run:
-            self.say("No Space job running.", "yellow")
-            return
-        if not run["sid"]:
+        if run and not run["sid"]:
             self.say(f"{run['d']['id']} is still uploading; stop it once it shows progress.", "yellow")
             return
-        self.space_call("cancel", run["sid"])
+        if run:
+            self.space_call("cancel", run["sid"])
+            return
+        live = [n.data for n in self.live_node.children if (n.data or {}).get("sid")]
+        if not live:
+            self.say("No Space job running.", "yellow")
+            return
+        if len(live) > 1:
+            self.say(f"{len(live)} jobs on the Space: select one under \"live on Space\" and press x.", "yellow")
+            return
+        sid, src = live[0]["sid"], Path(live[0].get("source") or live[0]["sid"]).stem
+        armed = getattr(self, "_stop_armed", None)
+        if armed and armed[0] == sid and time.time() - armed[1] < 5:
+            self._stop_armed = None
+            self.space_call("cancel", sid)
+        else:
+            self._stop_armed = (sid, time.time())
+            self.say(f"{src} ({sid}) was started outside this session. Press x again within 5s to stop it.",
+                     "bold yellow")
 
     def action_restart(self):
         run = self.space_run
@@ -1417,7 +1543,7 @@ class Hookline(App):
             return
         run = self.space_run
         if verb == "cancel":
-            self.call_from_thread(self.say, f"Stopping {sid} after the current item …", "yellow")
+            self.call_from_thread(self.say, f"Stopping {sid}: the Space stops at its next checkpoint (usually within a minute) …", "yellow")
         elif run:
             run.update(sid=r["job_id"], t0=time.time(), last_ok=time.time(), p={
                 "status": "queued", "stage_label": f"Restarted (was {sid}); waiting for the GPU",
@@ -1451,7 +1577,7 @@ class Hookline(App):
         node = next((n for n in self.own_node.children if (n.data or {}).get("path") == str(p)), None) \
             or self.own_node.add_leaf(p.name, data=d)
         self.own_node.expand()
-        self.query_one("#reels", Tree).move_cursor(node)
+        self.focus_node(node)
         self.current = d
         self.action_full()  # analyze right away (uploads to the GPU Space)
 
@@ -1465,7 +1591,7 @@ class Hookline(App):
             return
         node = random.choice(leaves)
         node.parent.expand()
-        tree.move_cursor(node)
+        self.focus_node(node)
         tree.focus()
 
     def action_web(self):
@@ -1537,6 +1663,8 @@ class Hookline(App):
             ok, info = space_ping(self.token)
             self.space_rt["health"] = f"{'ok' if ok else 'failing'} · {info}"
         self.call_from_thread(self.set_header)
+        if self.queue and not self.space_run and self.space_rt.get("stage") == "RUNNING":
+            self.call_from_thread(self.start_next)  # Space came up: resume the waiting queue
 
     @work(thread=True, group="space-ctl")
     def space_action(self, verb, screen):

@@ -1,7 +1,7 @@
 # AGENTS.md — Hookline Harness (wldd-hackathon-2026)
 
 Working prototype: video in → attention prediction → creator-actionable report.
-Front end: Textual TUI (`tui.py`, `./run-demo.sh`) + web report (`backend/app.py`, `uvicorn backend.app:app --port 8000`), demo cues `DEMO.md`. Heavy compute: HF Space `wlddhq/hookline-tribe` (`hf_space/`, Docker + FastAPI, a100-large, sleeps after 30 min idle) returns raw model output only; every report is built locally from that raw output (`tribe/rescore.py`). Colab notebook retired. What runs where: `ARCHITECTURE.md`.
+Front end: Textual TUI (`tui.py`, `./run-demo.sh`) + web report (`backend/app.py`, `uvicorn backend.app:app --port 8000`), demo cues `DEMO.md`. Heavy compute: HF Space `wlddhq/hookline-tribe` (`hf_space/`, Docker + FastAPI, a100-large, sleeps after 30 min idle) returns raw model output only; every report is built locally from that raw output (`tribe/rescore.py`). Colab notebook retired. Feature list + keys: `README.md`; what runs where: `ARCHITECTURE.md`.
 
 ## Core Beliefs (non-negotiable)
 1. **Judge video, not account.** Never use handle/follower count as a signal. Follower range + view count are validation context only.

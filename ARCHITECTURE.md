@@ -9,24 +9,29 @@ Hookline has three parts:
 All scoring logic lives locally. A formula change takes effect after a regenerate; no GPU run and no Space redeploy are needed.
 
 ```
- ┌──────────── your machine ─────────────┐            ┌──── Hugging Face Space (A100) ────┐
- │                                        │  1 upload  │                                   │
- │  tui.py ───────────────────────────────┼───────────▶│  POST /analyze  → job queue        │
- │   │  polls progress / ETA every 1s     │◀───────────┤  GET  /jobs/{id} (step, chunk, ETA)│
- │   │                                    │            │                                   │
- │   │                                    │            │  TRIBE v2: video + audio + text    │
- │   │                                    │            │  speech gate, Hinglish ASR,       │
- │   │                                    │            │  song lookup, emotion channels    │
- │   │ 3 job done → POST /import/{id}     │  4 raw zip │                                   │
- │   ▼                                    │◀───────────┤  GET  /jobs/{id}/raw              │
- │  backend/app.py (:8000)                │            └───────────────────────────────────┘
- │   ├─ tribe/rescore.py  fetch + rebuild │
- │   ├─ tribe/hookline_report.py scores   │
- │   ├─ emotion_fusion / audio_music      │
- │   ├─ suggest.py  editing suggestions   │
- │   └─ writes backend/out/<job>/report.* │
- │  5 TUI shows report; `v` opens web view│
- └────────────────────────────────────────┘
+ ┌──────────── your machine ──────────────┐            ┌──── Hugging Face Space (A100) ─────┐
+ │                                         │  1 upload  │                                    │
+ │  tui.py  pick reel / o file picker      │  video +   │  POST /analyze  → job queue         │
+ │   │  Enter / a → caption box (optional) ├───────────▶│  (one GPU job at a time)            │
+ │   │  local queue while a run is going   │  caption   │                                    │
+ │   │  polls progress / ETA every 1s      │◀───────────┤  GET  /jobs/{id} (step, chunk, ETA)│
+ │   │                                     │            │  TRIBE v2: video + audio + text     │
+ │   │                                     │            │  speech gate, Hinglish ASR,        │
+ │   │                                     │            │  song lookup, emotion channels     │
+ │   │                                     │            │  (scenes, faces, music, voice,     │
+ │   │                                     │            │  words), caption relevance signals │
+ │   │ 3 job done → POST /import/{id}      │  4 raw zip │                                    │
+ │   ▼                                     │◀───────────┤  GET  /jobs/{id}/raw               │
+ │  backend/app.py (:8000)                 │            └────────────────────────────────────┘
+ │   ├─ tribe/rescore.py   fetch + rebuild │
+ │   ├─ hookline_report.py scores, virality│
+ │   ├─ emotion_fusion / audio_music       │
+ │   ├─ caption.py  relevance + lift       │
+ │   ├─ suggest.py  editing suggestions    │
+ │   └─ writes backend/out/<job>/report.*  │
+ │  5 TUI shows report; v opens web view   │
+ │    S: Space status / start / stop       │
+ └─────────────────────────────────────────┘
 ```
 
 ## A full run, step by step
@@ -46,8 +51,9 @@ All scoring logic lives locally. A formula change takes effect after a regenerat
 
 ```mermaid
 flowchart TD
-    V[/"Reel (mp4)"/] --> TUI["TUI: upload + toggles<br/>video / audio / transcript, language"]
-    TUI -->|POST /analyze| Q["Space job queue<br/>(one video on the GPU at a time)"]
+    V[/"Reel (mp4)"/] --> TUI["TUI: Enter / a / o file picker<br/>run options (m), local queue"]
+    C[/"Caption (optional)"/] --> TUI
+    TUI -->|"POST /analyze<br/>video + caption"| Q["Space job queue<br/>(one video on the GPU at a time)"]
 
     subgraph SPACE["HF Space · A100 · hf_space/app.py"]
         Q --> AUD["Audio track, 16 kHz"]
@@ -64,8 +70,11 @@ flowchart TD
         AUD --> CLAP["CLAP: music mood"]
         AUD --> VOICE["wav2vec2: voice arousal / valence"]
         ASR --> GOEMO["GoEmotions: transcript emotion"]
+        Q --> CAPS["Caption signals<br/>CLIP vs frames + 55-reel gallery<br/>MiniLM vs transcript + controls"]
+        FR --> CAPS
+        ASR --> CAPS
         TRIBE --> RAW[("raw bundle<br/>preds, times, words.tsv, meta.json")]
-        GATE & SONG & CLIP & FACE & CLAP & VOICE & GOEMO --> RAW
+        GATE & SONG & CLIP & FACE & CLAP & VOICE & GOEMO & CAPS --> RAW
     end
 
     RAW -->|"GET /jobs/{id}/raw"| BE
@@ -76,13 +85,16 @@ flowchart TD
         BE --> MUS["Music rhythm · audio_music.py<br/>tempo, build-ups, beat-cut sync"]
         NET & SIG --> ATT["Attention per second (0-100)"]
         ATT --> SC["Hook · hold · finish · drop zones · peaks"]
-        BE --> EMO["Emotion fusion · emotion_fusion.py<br/>20 emotions, strong peaks, arc"]
-        SC & EMO --> VIR["Viral potential + tag"]
+        BE --> CAPR["Caption check · caption.py<br/>relevant? else ignored"]
+        BE --> EMO["Emotion fusion · emotion_fusion.py<br/>20 emotions, channel trust, strong peaks"]
+        CAPR -->|"caption emotion"| EMO
+        SC & EMO --> VIR["Viral potential + tag<br/>+ emotional peaks + caption context<br/>why-viral breakdown"]
+        CAPR -->|"lift"| VIR
         SC & EMO & MUS --> SUG["Editing suggestions · suggest.py"]
         VIR & SUG --> REP[("report.json / md / png")]
     end
 
-    REP --> OUT["TUI report pane · web view (w) · all reports (R)"]
+    REP --> OUT["TUI report pane · web view (v) · all reports (R), sortable"]
 ```
 
 ### What we analyse: seen, heard, said

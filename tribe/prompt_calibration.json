@@ -1,361 +1,361 @@
 {
- "reels": 4,
+ "reels": 36,
  "visual": {
   "a person doing something hilarious": [
-   0.19047,
-   0.03562
+   0.21165,
+   0.03949
   ],
   "a funny prank or blooper": [
-   0.21984,
-   0.03074
+   0.21798,
+   0.03294
   ],
   "a comedic reaction or funny face": [
-   0.17905,
-   0.04369
+   0.18665,
+   0.04182
   ],
   "an exciting fast action moment": [
-   0.18875,
-   0.02591
+   0.19008,
+   0.02983
   ],
   "a thrilling stunt or sports highlight": [
-   0.16828,
-   0.03228
+   0.15924,
+   0.03064
   ],
   "a breathtaking view of massive scale": [
-   0.15589,
-   0.02284
+   0.14629,
+   0.02608
   ],
   "an incredible, almost impossible feat": [
-   0.17122,
-   0.03619
+   0.18333,
+   0.02912
   ],
   "someone showing impressive skill or talent": [
-   0.17486,
-   0.02564
+   0.18186,
+   0.03439
   ],
   "an expert working flawlessly": [
-   0.18114,
-   0.02356
+   0.17995,
+   0.02675
   ],
   "an adorable baby or puppy": [
-   0.09864,
-   0.03421
+   0.11456,
+   0.03413
   ],
   "a cute animal being playful": [
-   0.14608,
-   0.05508
+   0.15124,
+   0.04505
   ],
   "an oddly satisfying perfect fit or process": [
-   0.20339,
-   0.02849
+   0.20176,
+   0.03971
   ],
   "something being cleaned or restored": [
-   0.14225,
-   0.04339
+   0.14412,
+   0.03672
   ],
   "delicious food being cooked": [
-   0.10865,
-   0.03215
+   0.12897,
+   0.0351
   ],
   "a mouth-watering dish close-up": [
-   0.1344,
-   0.02524
+   0.13586,
+   0.02906
   ],
   "an unexpected twist or reveal": [
-   0.16415,
-   0.04234
+   0.18606,
+   0.03526
   ],
   "a shocking moment": [
-   0.16122,
-   0.05276
+   0.17889,
+   0.03762
   ],
   "someone explaining a secret or a fact": [
-   0.15842,
-   0.02668
+   0.17146,
+   0.03484
   ],
   "a mystery being investigated": [
-   0.16217,
-   0.02536
+   0.16848,
+   0.027
   ],
   "old memories, childhood or retro footage": [
-   0.15335,
-   0.03153
+   0.15538,
+   0.03231
   ],
   "a couple in love": [
-   0.12443,
-   0.03564
+   0.13131,
+   0.03949
   ],
   "a romantic moment": [
-   0.13553,
-   0.04166
+   0.14407,
+   0.0384
   ],
   "a rescue or a recovery": [
-   0.13605,
-   0.04181
+   0.14613,
+   0.02923
   ],
   "someone overcoming hardship": [
-   0.11544,
-   0.0337
+   0.14361,
+   0.03331
   ],
   "a happy ending": [
-   0.15988,
-   0.03585
+   0.16664,
+   0.02845
   ],
   "a person or animal injured or in pain": [
-   0.12956,
-   0.054
+   0.13796,
+   0.03501
   ],
   "an animal suffering or struggling": [
-   0.11293,
-   0.06029
+   0.13329,
+   0.04164
   ],
   "someone grieving a loss": [
-   0.10813,
-   0.04101
+   0.14169,
+   0.03502
   ],
   "a person crying alone": [
-   0.13927,
-   0.0374
+   0.15206,
+   0.03704
   ],
   "a dangerous or scary situation": [
-   0.14778,
-   0.04005
+   0.16087,
+   0.03047
   ],
   "a horror scene": [
-   0.14622,
-   0.03912
+   0.14666,
+   0.0318
   ],
   "an injustice, someone being mistreated": [
-   0.11832,
-   0.06167
+   0.15561,
+   0.04041
   ],
   "a heated, angry argument": [
-   0.13447,
-   0.04864
+   0.1598,
+   0.03867
   ],
   "something gross or disgusting": [
-   0.1279,
-   0.04312
+   0.15555,
+   0.03719
   ],
   "rotten, filthy or dirty mess": [
-   0.12964,
-   0.04455
+   0.13943,
+   0.03309
   ],
   "an embarrassing cringe moment": [
-   0.18233,
-   0.04294
+   0.2009,
+   0.03774
   ],
   "an awkward social situation": [
-   0.14459,
-   0.04908
+   0.17634,
+   0.04
   ],
   "an act of kindness or compassion": [
-   0.15017,
-   0.03871
+   0.16265,
+   0.02753
   ],
   "people caring for someone in need": [
-   0.15351,
-   0.03562
+   0.16519,
+   0.03428
   ],
   "an emotional reunion": [
-   0.14637,
-   0.05994
+   0.1605,
+   0.04295
   ],
   "an ordinary everyday scene": [
-   0.16042,
-   0.05309
+   0.17045,
+   0.03487
   ],
   "a plain product shot": [
-   0.16027,
-   0.0218
+   0.15137,
+   0.02663
   ],
   "a person talking to the camera": [
-   0.19599,
-   0.03457
+   0.19882,
+   0.0418
   ]
  },
  "music": {
   "slow mournful melody on flute or strings": [
-   0.20611,
-   0.17126
+   0.15102,
+   0.14695
   ],
   "melancholic sad piano music": [
-   0.06428,
-   0.08161
+   0.07481,
+   0.11112
   ],
   "hopeful uplifting inspiring music": [
-   0.11869,
-   0.09778
+   0.0987,
+   0.11797
   ],
   "emotional music swelling to a climax": [
-   0.16929,
-   0.1333
+   0.13748,
+   0.16225
   ],
   "epic triumphant cinematic orchestra": [
-   0.02694,
-   0.08819
+   0.01684,
+   0.1261
   ],
   "tense suspenseful music": [
-   0.16216,
-   0.12233
+   0.15131,
+   0.1237
   ],
   "scary horror soundtrack": [
-   -0.05694,
-   0.1413
+   -0.10871,
+   0.11497
   ],
   "happy upbeat cheerful music": [
-   0.22032,
-   0.11918
+   0.21985,
+   0.12276
   ],
   "comedic quirky funny music": [
-   0.18569,
-   0.10364
+   0.23171,
+   0.11163
   ],
   "romantic love song": [
-   0.03802,
-   0.14432
+   -0.01601,
+   0.14899
   ],
   "nostalgic retro music": [
-   0.12612,
-   0.15783
+   0.0888,
+   0.15034
   ],
   "energetic hype phonk or edm beat": [
-   0.13013,
-   0.09238
+   0.0917,
+   0.08696
   ],
   "aggressive angry heavy music": [
-   0.10982,
-   0.06542
+   0.09461,
+   0.1067
   ],
   "mysterious curious music": [
-   0.02743,
-   0.12265
+   0.0198,
+   0.10333
   ],
   "calm relaxing ambient music": [
-   0.05667,
-   0.14144
+   0.01496,
+   0.12778
   ],
   "people talking with no music": [
-   -0.05419,
-   0.10175
+   -0.07643,
+   0.07682
   ],
   "silence": [
-   -0.06116,
-   0.07713
+   -0.10198,
+   0.08517
   ]
  },
  "text": {
-  "amusement": [
-   0.19422,
-   0.32055
-  ],
   "neutral": [
-   0.36837,
-   0.20043
+   0.53284,
+   0.28451
   ],
-  "joy": [
-   0.02395,
-   0.02469
-  ],
-  "approval": [
-   0.14644,
-   0.16785
-  ],
-  "annoyance": [
-   0.0146,
-   0.01285
-  ],
-  "realization": [
-   0.17846,
-   0.31312
-  ],
-  "admiration": [
-   0.02249,
-   0.04747
-  ],
-  "love": [
-   0.00422,
-   0.00405
-  ],
-  "excitement": [
-   0.00957,
-   0.01223
-  ],
-  "disapproval": [
-   0.00748,
-   0.00523
-  ],
-  "optimism": [
-   0.00829,
-   0.00524
+  "amusement": [
+   0.12082,
+   0.24839
   ],
   "curiosity": [
-   0.08204,
-   0.10518
+   0.08971,
+   0.1328
   ],
-  "sadness": [
-   0.00705,
-   0.01883
-  ],
-  "disappointment": [
-   0.01267,
-   0.02016
-  ],
-  "anger": [
-   0.0022,
-   0.00118
+  "approval": [
+   0.09799,
+   0.1308
   ],
   "confusion": [
-   0.03216,
-   0.03402
+   0.03037,
+   0.03464
   ],
-  "caring": [
-   0.00753,
-   0.02298
+  "joy": [
+   0.01355,
+   0.0204
   ],
-  "disgust": [
-   0.00197,
-   0.00168
+  "admiration": [
+   0.02383,
+   0.07067
   ],
-  "desire": [
-   0.00149,
-   0.00059
+  "excitement": [
+   0.00637,
+   0.00941
   ],
-  "embarrassment": [
-   0.00645,
-   0.00996
+  "realization": [
+   0.04777,
+   0.16579
+  ],
+  "annoyance": [
+   0.0104,
+   0.00761
+  ],
+  "love": [
+   0.03479,
+   0.14358
+  ],
+  "optimism": [
+   0.00543,
+   0.0058
+  ],
+  "disapproval": [
+   0.01914,
+   0.06371
   ],
   "surprise": [
-   0.00543,
-   0.00532
+   0.00321,
+   0.00391
+  ],
+  "caring": [
+   0.01352,
+   0.03697
+  ],
+  "desire": [
+   0.00155,
+   0.00078
+  ],
+  "anger": [
+   0.00185,
+   0.00091
+  ],
+  "disappointment": [
+   0.00455,
+   0.01055
+  ],
+  "disgust": [
+   0.00147,
+   0.00101
   ],
   "relief": [
-   0.00444,
-   0.0052
+   0.00375,
+   0.00852
   ],
-  "gratitude": [
-   0.00203,
-   0.00211
-  ],
-  "remorse": [
-   0.02346,
-   0.09342
+  "sadness": [
+   0.00279,
+   0.00929
   ],
   "fear": [
-   0.00121,
-   0.00103
+   0.00097,
+   0.00075
+  ],
+  "embarrassment": [
+   0.00199,
+   0.00526
   ],
   "nervousness": [
-   0.00154,
-   0.0016
+   0.00061,
+   0.00109
+  ],
+  "remorse": [
+   0.00495,
+   0.04574
+  ],
+  "gratitude": [
+   0.04554,
+   0.15752
   ],
   "pride": [
-   0.00208,
-   0.00257
+   0.00102,
+   0.00201
   ],
   "grief": [
-   0.00071,
-   0.00145
+   0.00029,
+   0.00079
   ]
  },
  "note": "per-prompt [mean, std] of raw similarity (text: label probability) across the corpus"

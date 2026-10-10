@@ -40,6 +40,29 @@ def _calibration():
 CAL = _calibration()
 
 
+def _zscores(S, prompts, channel):
+    """Per-prompt z-scores vs the corpus, or None when calibration is not active for this channel."""
+    c = (CAL or {}).get(channel) or {}
+    if not c or not all(p in c for p in prompts):
+        return None
+    mu = np.array([c[p][0] for p in prompts])
+    sd = np.array([c[p][1] for p in prompts])
+    return (S - mu) / np.maximum(sd, 1e-4)
+
+
+def _gated(S, Z, prompts, table, scale):
+    """Raw softmax share of each prompt x how far above its usual level it scores; the rest is calm."""
+    P = _softmax(S, scale)
+    G = P * np.clip((Z - Z_ON) / (Z_FULL - Z_ON), 0, 1)
+    D = np.zeros((S.shape[0], len(EMOTIONS)))
+    for j, p in enumerate(prompts):
+        for e, w in table(p).items():
+            D[:, EMOTIONS.index(e)] += w * G[:, j]
+    calm = EMOTIONS.index("calm")
+    D[:, calm] += np.clip(1.0 - D.sum(1), 0, 1)
+    return D
+
+
 def _calibrated(S, prompts, channel):
     """Raw similarities -> per-prompt z-scores ('higher than usual for this prompt') when calibrated."""
     c = (CAL or {}).get(channel) or {}
@@ -48,6 +71,17 @@ def _calibrated(S, prompts, channel):
     mu = np.array([c[p][0] for p in prompts])
     sd = np.array([c[p][1] for p in prompts])
     return (S - mu) / sd * Z_SCALE[channel]
+# "No clear emotion" by default. The raw ranking (softmax over a channel's prompts) decides WHICH prompt
+# fits a second best; calibration decides WHETHER it counts: a prompt keeps its share only to the extent it
+# scores above its usual corpus level (0 at z Z_ON, full at z Z_FULL). Always-high "hub" prompts ("a funny
+# prank") therefore count for nothing; the remaining mass is calm. A second gets an emotion only when it
+# clearly beats calm.
+Z_ON, Z_FULL = 1.0, 2.5
+CLEAR_MIN = 0.30          # evidence the top emotion needs in at least one trusted channel
+FACE_MIN_AREA = 0.010     # face box >= 1% of the frame (smaller "faces" are unreadable or not faces at all)
+FACE_MIN_CONF = 0.6       # the frame's top expression must be at least this confident
+FACE_BASELINE = 0.7       # subtract 70% of the person's median per expression (resting face is not emotion)
+SUPPORT_MIN = 0.3         # a channel "supports" an emotion in a second when its evidence is >= this
 VISUAL_TEMPER = 0.5                          # for legacy probability cues only
 VISUAL_STRONG_WEIGHT = 0.5                   # visual alone (scene) can't make a strong peak
 STRONG_LEVEL, STRONG_PROMINENCE, STRONG_DROP, STRONG_FULL = 0.6, 0.15, 0.15, 0.30
@@ -83,6 +117,9 @@ def visual_dist(cue, n):
     if "prompt_sim" in cue:
         prompts = [p for p in TX.VISUAL_PROMPTS if p in cue["prompt_sim"]]
         S = np.array([_seconds(cue["prompt_sim"][p], n, 0.0) for p in prompts], dtype=float).T
+        Z = _zscores(S, prompts, "visual")
+        if Z is not None:
+            return _gated(S, Z, prompts, lambda p: {TX.VISUAL_PROMPTS[p]: 1.0}, ZS_SCALE["visual"])
         P = _softmax(_calibrated(S, prompts, "visual"))
         for j, p in enumerate(prompts):
             D[:, EMOTIONS.index(TX.VISUAL_PROMPTS[p])] += P[:, j]
@@ -105,6 +142,10 @@ def music_dist(cue, n):
         prompts = [p for p in TX.MUSIC_PROMPTS if p in cue["prompt_sim"]]
         table = TX.MUSIC_PROMPTS
         S = np.array([_seconds(cue["prompt_sim"][p], n, 0.0) for p in prompts], dtype=float).T
+        Z = _zscores(S, prompts, "music")
+        if Z is not None:
+            top = [prompts[i] for i in S.argmax(1)] if len(S) else []
+            return _gated(S, Z, prompts, lambda p: table.get(p, {}), ZS_SCALE["music"]), top
         P = _softmax(_calibrated(S, prompts, "music"))
     else:
         src = cue.get("sim", cue)
@@ -127,8 +168,9 @@ def text_dist(text, n):
             continue
         seen[t] = True
         tc = (CAL or {}).get("text") or {}
-        if tc:  # calibrated: only labels firing above their usual level count (removes label bias)
-            d = {k: max(0.0, (v - tc[k][0]) / tc[k][1]) / 3.0 if k in tc else v for k, v in d.items()}
+        if tc:  # calibrated: a label keeps its probability only as far as it fires above its usual level
+            d = {k: v * float(np.clip(((v - tc[k][0]) / max(tc[k][1], 1e-4) - Z_ON) / (Z_FULL - Z_ON), 0, 1))
+                 if k in tc and k != "neutral" else v for k, v in d.items()}
         for go, p in d.items():
             for e, w in TX.GO_MAP.get(go, {}).items():
                 D[t, EMOTIONS.index(e)] += w * p
@@ -139,13 +181,21 @@ def face_dist(cue, n):
     """(n, len(EMOTIONS)) from per-frame expression probabilities, smoothed over FACE_SMOOTH_S seconds
     (mean over the frames that have a face; seconds with no face nearby stay empty)."""
     probs = _seconds((cue or {}).get("probs"), n)
-    if not any(probs):
+    area = _seconds((cue or {}).get("area"), n, 0.0)
+    # readable frames only: a big enough face and a confident expression
+    ok = [bool(d) and (area[t] or 0) >= FACE_MIN_AREA and max(d.values()) >= FACE_MIN_CONF for t, d in enumerate(probs)]
+    if not any(ok):
         return None
+    labels = sorted({k for t, d in enumerate(probs) if ok[t] for k in d})
+    base = {k: float(np.median([probs[t].get(k, 0.0) for t in range(n) if ok[t]])) for k in labels}
     D = np.full((n, len(EMOTIONS)), np.nan)
     for t, d in enumerate(probs):
-        if d:
+        if ok[t]:
+            # vs this person's resting face: a serious face all along is not sorrow in every second
+            adj = {k: max(0.0, v - FACE_BASELINE * base.get(k, 0.0)) for k, v in d.items() if k != "neutral"}
+            adj["neutral"] = max(0.0, 1.0 - sum(adj.values()))
             row = np.zeros(len(EMOTIONS))
-            for lab, p in d.items():
+            for lab, p in adj.items():
                 for e, w in TX.FACE_MAP.get(lab, {}).items():
                     row[EMOTIONS.index(e)] += w * p
             D[t] = row
@@ -239,7 +289,28 @@ def fuse(report, extra):
                        (2 * a_emo + 0.5 * a_acoustic) / 2.5)
     valence = np.where(np.isfinite(vv), (2 * v_emo + (np.nan_to_num(vv) * 2 - 1)) / 3, v_emo)
     arousal, valence = np.clip(arousal, 0, 1), np.clip(valence, -1, 1)
-    dominant = [EMOTIONS[int(np.argmax(emo[t]))] if intensity[t] > 0.35 else "calm" for t in range(n)]
+    # a second has an emotion only when the top one is clear: >= CLEAR_MIN and above calm; else "calm"
+    # (shown as "no clear emotion")
+    # evidence per emotion = the strongest single channel (weighted, trusted); channels that abstain (calm)
+    # must not outvote one that clearly shows an emotion
+    ev = np.zeros((n, len(EMOTIONS)))
+    for k, D in ch.items():
+        if D is not None:
+            ev = np.maximum(ev, min(1.0, CHANNEL_WEIGHT[k] * trust.get(k, 1.0)) * D)
+    ev[:, calm] = 0
+    dominant = []
+    for t in range(n):
+        k = int(np.argmax(ev[t]))
+        dominant.append(EMOTIONS[k] if ev[t, k] >= CLEAR_MIN else "calm")
+    # confidence: how many channels independently support the emotion in its seconds
+    support = []
+    for t, e in enumerate(dominant):
+        if e != "calm":
+            j = EMOTIONS.index(e)
+            support.append(sum(1 for k, D in ch.items() if D is not None and D[t, j] >= SUPPORT_MIN))
+    clear_share = 1.0 - dominant.count("calm") / max(n, 1)
+    agree = float(np.mean(support)) if support else 0.0
+    confidence = ("none" if not support else "high" if agree >= 2 else "medium" if agree >= 1.2 else "low")
 
     sal = (report["series"].get("network_z") or {}).get("salience")
     brain_r = None
@@ -263,6 +334,9 @@ def fuse(report, extra):
                    "dominant": dominant, "intensity": [round(float(x), 3) for x in intensity],
                    "probs": {e: [round(float(x), 3) for x in emo[:, j]] for j, e in enumerate(EMOTIONS) if e != "calm"}},
         "summary": {"dominant_emotions": _top(dominant), "sequence": seq[:8], **feats,
+                    "no_clear_share": round(1.0 - clear_share, 3), "confidence": confidence,
+                    "channels_agreeing": round(agree, 2),
+                    "calibrated": bool(CAL), "calibration_reels": (CAL or {}).get("reels", 0),
                     "peak_moments": [{"at_s": m["peak_at"], "emotion": m["emotion"],
                                       "arousal": round(float(arousal[m["peak_at"]]), 2)} for m in strong["moments"][:5]]},
         "strong": strong,

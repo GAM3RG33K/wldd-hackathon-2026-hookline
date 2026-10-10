@@ -20,7 +20,8 @@ Source of truth: `tribe/hookline_report.py` (attention, scores, virality), `trib
 - Channels → per-second distributions: visual (softmax over raw CLIP sims, ×40), face (`FACE_MAP`, 3s mean over frames with a face), music (CLAP; **dropped** when the gate's music / vocals / bed / humming ratios are all < 0.1), text (GoEmotions via `GO_MAP`, `neutral → calm`), sounds (AST laughter / cheering / gasps …).
 - `channel_trust`: music 0.5 in speech / speech-over-music reels (a bed); text 0.5 unless the transcript is plain English.
 - Strong emotions (`STRONG`: amusement, awe, anger→outrage, sadness→sorrow, moved, fear, disgust, empathic pain): evidence = max over channels (visual at 0.5, so scenes alone never qualify; text backed 0.4 by voice arousal), peaks ≥ 0.6 with prominence 0.15; "moved" also fires on a turn from suffering to hope / kindness. `strength = 100*min(1, share/0.30)`. `audible_laughter_s` (AST) is reported separately.
-- Prompt calibration (`calibrate_prompts.py` → `prompt_calibration.json`) only activates with ≥ 15 reference reels.
+- **No clear emotion by default** (active since calibration covers 36 reels, `calibrate_prompts.py` → `prompt_calibration.json`, needs ≥ 15): per prompt / label, the raw softmax share decides WHICH fits; calibration decides WHETHER it counts (share × ramp(z, 1.0 → 2.5) vs its corpus level; the rest is calm). Always-high hub prompts count for nothing. A second gets an emotion only when one trusted channel shows ≥ 0.30 evidence; else "no clear emotion". Summary adds `no_clear_share`, `confidence` (high ≥ 2 channels agree on average, medium ≥ 1.2, low = one channel) and `channels_agreeing`.
+- Faces: only faces ≥ 1% of the frame with a top expression ≥ 0.6; each expression minus 70% of that person's median in the reel (resting face); 3s mean. Caption emotion never adds calm.
 
 ## Data model (`backend/out/<job>/`)
 - `raw/` (from the Space, kept forever) + `report.json`, `report.md`, `report.png`.

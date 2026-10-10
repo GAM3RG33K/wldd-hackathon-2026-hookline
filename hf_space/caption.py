@@ -85,6 +85,7 @@ def emotion_channel(block, n):
     if not block or not block.get("emotion") or block["relevance"] <= 0:
         return None
     d = np.asarray(block["emotion"]["dist"], dtype=float) * block["relevance"]
+    d[TX.NAMES.index("calm")] = 0.0  # a caption adds emotional context; a neutral caption must not mute the reel
     return np.tile(d, (n, 1))
 
 

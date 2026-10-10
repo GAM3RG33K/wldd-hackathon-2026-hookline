@@ -11,9 +11,10 @@
 - Hookline predicts second-by-second attention before posting; judges the video, never the account.
 
 ## 0:02 Live
-- TUI: arrow to a reel; its saved report opens (Enter / `p`). `v` opens the web report.
-- No report yet → "press a". `a` = analyze on the GPU Space (progress, chunk, ETA live). More requests queue up.
-- Own file: `o` opens the file picker; analysis starts on pick. `m` run options (video / audio / transcript, language).
+- TUI: arrow to a reel; its saved report opens. `v` opens the web report. Enter = caption box, then analyze (Esc = just the report).
+- Enter / `a` → caption box (optional, 5 lines; paste the post caption) → analyze on the GPU Space (progress, chunk, ETA live). More requests queue up; with the Space paused they wait and start once it is live.
+- Caption demo: the product review with its real caption (+9.7) vs another reel's caption (ignored, +0).
+- Own file: `o` opens the file picker, then the caption box. `m` run options (video / audio / transcript, language).
 - Anything fails → `★ Demo report` in the tree, or any saved report.
 
 ## 0:06 Report
@@ -22,6 +23,7 @@
 - "Why viral potential N": biggest boost and biggest drag, each factor's pull vs a typical reel.
 - Emotion: predicted feeling of the viewer (scenes, faces, music, voice, words); strong peaks only when they spike. Audible laughter counted separately.
 - Editing suggestions: timestamped, evidence vs the reel's own best part; `V` model-checks the top 3 on the GPU.
+- Caption section (only if given): verdict, evidence, effect on viral potential.
 - Transcript used for judging (Hinglish ASR; songs / humming skip the transcript).
 
 ## 0:11 Architecture

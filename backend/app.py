@@ -388,7 +388,12 @@ def _emotion_html(r: dict) -> str:
     cells = "".join(f'<i title="{_fmt_t(t)} {d}" style="flex:1;background:{EMO_COLORS.get(d, "#555")};'
                     f'opacity:{0.15 + 0.85 * a:.2f}"></i>' for t, (d, a) in enumerate(zip(s["dominant"], s["arousal"])))
     sm = em["summary"]
-    dom = ", ".join(f'{x["emotion"]} {x["share"]:.0%}' for x in sm.get("dominant_emotions", [])) or "mostly neutral"
+    dom = ", ".join(f'{x["emotion"]} {x["share"]:.0%}' for x in sm.get("dominant_emotions", [])) or "no clear emotion"
+    if sm.get("no_clear_share") is not None:
+        dom += f' · no clear emotion {sm["no_clear_share"]:.0%}'
+    if sm.get("confidence"):
+        dom += (f' · confidence {sm["confidence"]} ({sm.get("channels_agreeing", 0):.1f} channels agree on average)'
+                if sm["confidence"] != "none" else "")
     peaks = ", ".join(f'{_fmt_t(p["at_s"])} {p["emotion"]}' for p in sm.get("peak_moments", [])) or "none"
     shown = set(s["dominant"]) - {"neutral", "calm"}
     legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e.replace("_", " ")}</span>'

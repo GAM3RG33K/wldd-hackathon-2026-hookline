@@ -362,3 +362,27 @@
 - Follower markers `! $ $$ $$$` replaced by plain ranges ("146k views · 200k–1M followers"); reels column 46 wide; reel card adds the size word.
 - Pending: Space deploy after the 45-reel re-run finishes (deploy restarts the container).
 - Deployed (Space commit 87c867c) after stopping the re-run at 27/45 (1 Space job cancelled). GPU check on the product review: borrowed caption -> ignored (frames z 0.53, speech z 0.91, +0); true Hinglish caption -> matches (2.75 / 3.14, relevance 1.0, +9.7, viral 45.3). Same numbers as the CPU test. Caption emotion list drops "calm".
+
+## 2026-10-11 — Fix: x did not stop Space jobs started elsewhere
+- `x` only knew this session's own run (`space_run`), so jobs from the batch script, another TUI or a TUI started before a restart answered "No Space job running". Now: selected "live on Space" job -> cancel; own run -> cancel; otherwise the only active Space job -> cancel on a second press within 5s; several -> asks to select one. Headless test covers all four paths (Space call stubbed).
+
+## 2026-10-11 — Caption box on every Enter / file pick
+- Enter on a reel or file -> `CaptionPrompt` -> (re-)analyze; Esc in the box opens the saved report (or the no-report card). `p` still opens the report without a box. `o` always shows the box.
+- No more "Space paused, press S" refusal before the box: with the Space paused / stopped the run is queued, and `poll_space` starts the queue by itself once the stage is RUNNING.
+- Headless test: Enter -> box, Esc -> report, Enter + caption with Space paused -> queued with caption, o -> box -> queued, Space live -> first queued run starts.
+- Caption box is now a 5-line wrapping `CaptionArea` (TextArea subclass): Enter submits, pasted line breaks are kept, live counter n/2200.
+
+## 2026-10-11 — Docs: README with feature list, diagrams with caption path
+- New root `README.md`: overview, quick start, feature list (analyse / audio + words / score + explain / improve / reports), TUI keys, docs index.
+- ARCHITECTURE.md: ASCII diagram (caption box, queue, caption.py, Space control) and mermaid flow (caption input, caption signals on the Space, caption check -> emotion + virality lift, why-viral breakdown, sortable reports). DEMO.md, AGENTS.md, `.ai/rules/03`, `hf_space/README.md` updated for the caption box, Enter flow and follower ranges.
+
+## 2026-10-11 — Fix: live entry label + tree jumping to the top
+- Live entries glued name and stage ("lift-prankpredict 16s"): now "name  ·  stage 16s", long names cut with "…".
+- Root cause of the jump: `add_own_file` (and `r`) called `move_cursor` on a node added / expanded in the same refresh; the node has no line yet, so the cursor fell to line 0 ("★ Demo report", top of the panel). `focus_node` moves + scrolls after the next refresh. Reproduced headless before/after: o -> caption -> live job -> saved refresh now keeps "lift-prank.mp4" selected and the scroll position.
+- Also hardened: live list updates add/remove only changed entries; saved-report rebuilds restore the cursor node and scroll (`cursor_snapshot` / `cursor_restore`, highlight side effects skipped while restoring).
+
+## 2026-10-11 — Emotion: no clear emotion by default, stricter faces, confidence
+- Calibration rebuilt from 36 reels (now active). Visual / music: raw softmax share x ramp(z) gate; text: probability x ramp(z) (neutral untouched); caption emotion never adds calm.
+- Per-second label: strongest single trusted channel >= 0.30 else "no clear emotion"; summary `no_clear_share`, `confidence`, `channels_agreeing`; shown in web + TUI emotion lines.
+- Faces: area >= 1%, top expression >= 0.6, minus 70% of the reel median per expression.
+- Iterations on the 3 check reels (FL041, rajpsych_2, product review): absolute-z (FL041 lost everything), fused-prob dominance (FL041 99% none), text z explosion (rajpsych disgust 17%) -> final in .ai/research/emotion.md. Only these 3 reels re-scored; the rest still carry the previous emotion scoring until `python tribe/rescore.py`.

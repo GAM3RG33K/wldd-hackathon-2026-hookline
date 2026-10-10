@@ -24,6 +24,12 @@
 - Fixed control captions alone fail on frames: CLIP rewards anything that fits "a person in a reel" ("follow for more #viral #reels" z 2.67; another reel's caption z 2.39). Specificity vs a gallery of other reels separates them: true captions frames z 2.3–3.9, generic / borrowed / unrelated ≤ 1.51. Transcript similarity (multilingual MiniLM) catches Hinglish captions (true z 3.14 vs ≤ 1.05). Rule: stronger z, 0 at 1.6, full at 3.0.
 - Miss: abstract true captions ("betrays you before navratri") — neither test sees betrayal.
 
+## Forced choice → no clear emotion (2026-10-11)
+- Audit of 36 reels before: calm won 0% of seconds (median), amusement topped 28/36 reels, strong "sorrow" in 12/36 (faces read talking faces as sad; sad = top label in 17% of face frames).
+- Rejected: absolute ramped z alone (music-only reels have every music prompt "above usual" vs a speech-heavy corpus; "scary horror" beat "mournful" on FL041 through a tiny corpus std) and fused-probability dominance (abstaining channels outvoted the one clear channel → FL041 99% no emotion).
+- Kept: raw ranking × calibration gate, single-channel clear evidence ≥ 0.30, face gates (area ≥ 1%, conf ≥ 0.6, 70% resting-face baseline), text labels gated the same way (rare GoEmotions labels had exploded to 0.83).
+- Check reels: FL041 sadness 59% / no clear 29% / sorrow peaks kept; rajpsych amusement 35%, sadness 21%, no clear 37%, sorrow 0:28 + 1:01, outrage 1:07; product review satisfaction 49%, amusement 84% → 14%, no clear 35%, no strong peaks. Confidence "low" on all three (evidence mostly from one channel at a time).
+
 ## Open
 - Humour / jokes need semantics (Hinglish-capable LLM over transcript, or a VLM story layer, e.g. Qwen2.5-VL-7B).
 - Prompt calibration activates at ≥ 15 reference reels (`calibrate_prompts.py`); rebuild after the full re-run.
