@@ -251,3 +251,15 @@
 - Dry-run L2 logistic fit on the top 5 features: leave-one-out accuracy 65% (chance 50%).
   n=10 vs 10, so the 95% interval on each d is roughly +-0.9: directional evidence only.
 - Not applied yet; it is waiting for the user's decision. The Space scorer was synced after the batch (1c3f1e7).
+
+## Emotion + suggestions deploy: model loading fix
+- The first deploy loaded no emotion models: transformers refuses `.bin` weights with
+  torch < 2.6 (torch.load CVE), and TRIBE pins torch 2.5.1. openai/clip-vit-base-patch32 ships
+  .bin only (its safetensors versions are unmerged community PRs). Switched to
+  laion/CLIP-ViT-B-32-laion2B-s34B-b79K (MIT, safetensors). The voice (audeering) and text
+  (SamLowe GoEmotions) models already ship safetensors. use_safetensors=True is forced
+  everywhere, and the warm-up loads each channel independently (BOOT shows ready / PARTIAL).
+  It now boots `emotion_models: ready (11s)`.
+- The test chain had hung silently twice: the first time it waited on a model warm-up that
+  never finished, the second time on a quoting bug in its health check. Lesson: the chain
+  must check that the job was actually submitted, not just wait.

@@ -906,8 +906,10 @@ def _warm_emotion():
     try:
         import emotion as EMO
         t0 = time.time()
-        EMO.warm(DEVICE)
-        BOOT["emotion_models"] = f"ready ({time.time() - t0:.0f}s)"
+        st = EMO.warm(DEVICE)
+        ok = all(v == "ok" for v in st.values())
+        BOOT["emotion_models"] = (f"ready ({time.time() - t0:.0f}s)" if ok else
+                                  f"PARTIAL ({time.time() - t0:.0f}s): {st}")
     except Exception as e:  # noqa: BLE001 - jobs retry lazily and log per channel
         BOOT["emotion_models"] = f"FAILED {type(e).__name__}: {e}"[:300]
 

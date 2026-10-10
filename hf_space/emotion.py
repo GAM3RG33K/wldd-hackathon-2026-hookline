@@ -15,7 +15,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-CLIP_REPO = "openai/clip-vit-base-patch32"
+# safetensors only: transformers refuses .bin weights on torch < 2.6 (CVE), and TRIBE pins torch 2.5.1.
+# openai/clip-vit-base-patch32 ships .bin only; LAION's B/32 (MIT) ships safetensors.
+CLIP_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
 VOICE_REPO = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"  # CC-BY-NC-SA: prototype only
 TEXT_REPO = "SamLowe/roberta-base-go_emotions"
 
@@ -45,7 +47,8 @@ def _frames(video, out_dir, fps=1, width=640):
 def _clip(frames, device):
     from transformers import CLIPModel, CLIPProcessor
     if "clip" not in _M:
-        _M["clip"] = (CLIPModel.from_pretrained(CLIP_REPO, torch_dtype=torch.float32).eval().to(device),
+        _M["clip"] = (CLIPModel.from_pretrained(CLIP_REPO, torch_dtype=torch.float32, use_safetensors=True)
+                      .eval().to(device),
                       CLIPProcessor.from_pretrained(CLIP_REPO))
     model, proc = _M["clip"]
     labels = list(CLIP_PROMPTS)
@@ -91,7 +94,8 @@ def _voice(audio, sr, speech_prob, device):
             return self.classifier(torch.mean(self.wav2vec2(input_values)[0], dim=1))
 
     if "voice" not in _M:
-        _M["voice"] = (EmotionModel.from_pretrained(VOICE_REPO, torch_dtype=torch.float32).eval().to(device),
+        _M["voice"] = (EmotionModel.from_pretrained(VOICE_REPO, torch_dtype=torch.float32, use_safetensors=True)
+                       .eval().to(device),
                        Wav2Vec2Processor.from_pretrained(VOICE_REPO))
     model, proc = _M["voice"]
     n = len(speech_prob)
@@ -113,7 +117,7 @@ def _text(segments, n, device):
     from transformers import pipeline
     if "text" not in _M:
         _M["text"] = pipeline("text-classification", model=TEXT_REPO, top_k=None,
-                              device=0 if device == "cuda" else -1)
+                              device=0 if device == "cuda" else -1, model_kwargs={"use_safetensors": True})
     clf = _M["text"]
     per_sec = [None] * n
     if not segments:
@@ -127,12 +131,20 @@ def _text(segments, n, device):
 
 
 def warm(device):
-    """Load the models once at startup so the first job does not pay the downloads."""
+    """Load each model once at startup (independently: one failure does not block the others).
+    Returns {channel: "ok" | error}."""
     import numpy as np
     from PIL import Image
-    _clip([Image.new("RGB", (64, 64))], device)
-    _voice(np.zeros(32000, dtype=np.float32), 16000, [1.0], device)
-    _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device)
+    status = {}
+    for name, fn in (("visual", lambda: _clip([Image.new("RGB", (64, 64))], device)),
+                     ("voice", lambda: _voice(np.zeros(32000, dtype=np.float32), 16000, [1.0], device)),
+                     ("text", lambda: _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device))):
+        try:
+            fn()
+            status[name] = "ok"
+        except Exception as e:  # noqa: BLE001
+            status[name] = f"{type(e).__name__}: {e}"[:200]
+    return status
 
 
 def emotion_cues(video, audio, sr, speech_prob, segments, device, log=print):
