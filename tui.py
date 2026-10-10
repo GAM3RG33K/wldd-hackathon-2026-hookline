@@ -141,8 +141,7 @@ def eta_text(p):
     return "ETA unknown"
 
 
-EMO_STYLE = {"amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
-             "tension": "#ef4444", "outrage": "#b91c1c", "warmth": "#22c55e", "sadness": "#3b82f6"}
+EMO_STYLE = {'amusement': '#f5b301', 'excitement': '#f97316', 'awe': '#7c3aed', 'admiration': '#a78bfa', 'adoration': '#f9a8d4', 'satisfaction': '#2dd4bf', 'craving': '#d97706', 'surprise': '#ec4899', 'interest': '#06b6d4', 'nostalgia': '#c4b5fd', 'romance': '#e11d48', 'hope': '#84cc16', 'empathic_pain': '#fb7185', 'sadness': '#3b82f6', 'fear': '#ef4444', 'anger': '#b91c1c', 'disgust': '#65a30d', 'awkwardness': '#a3a3a3', 'moved': '#22c55e', 'laughter': '#f5b301', 'outrage': '#b91c1c', 'sorrow': '#3b82f6'}
 AUDIO_TYPES = {"song": "song", "speech_over_music": "speech over music", "speech": "speech",
                "instrumental": "instrumental music", "humming": "humming / chant", "other": "no clear speech"}
 
@@ -223,7 +222,7 @@ class AttentionStrip(Widget):
             first_col.setdefault(s, i)
         dot_at = {}
         for s, i in first_col.items():
-            if s < len(dom) and dom[s] != "neutral" and (aro[s] if s < len(aro) else 0) > 0.25:
+            if s < len(dom) and dom[s] not in ("neutral", "calm") and (aro[s] if s < len(aro) else 0) > 0.25:
                 dot_at[i] = EMO_STYLE.get(dom[s], "white")
         out = Text()
         for row in range(rows):

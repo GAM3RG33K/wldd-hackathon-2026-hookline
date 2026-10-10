@@ -55,6 +55,11 @@ def analyse_music(video, T, cuts=()):
     brightness = _per_second(centroid, fps, T) / (SR / 2)  # 0..1 of Nyquist
     tempo_global, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=SR, hop_length=HOP, units="time")
     tempo_global = float(np.atleast_1d(tempo_global)[0])
+    # octave correction: beat trackers double slow music; sparse onsets at a "fast" tempo = half time
+    dens = len(onsets) / max(T, 1)
+    halved = bool(tempo_global > 95 and dens < 1.5 * tempo_global / 60 / 2)
+    if halved:
+        tempo_global /= 2
     # local tempo from beat intervals (BPM per second, held between beats)
     bpm = np.full(T, tempo_global)
     if len(beats) > 2:
@@ -62,7 +67,7 @@ def analyse_music(video, T, cuts=()):
         for t in range(T):
             near = ibi[(beats[1:] >= t - 2) & (beats[1:] < t + 3)]
             if len(near):
-                bpm[t] = 60.0 / np.median(near)
+                bpm[t] = 60.0 / np.median(near) / (2 if halved else 1)
     beat_strength = _per_second(onset_env, fps, T, how=np.max)
     beat_strength = beat_strength / (beat_strength.max() + 1e-9)
     chroma = librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=HOP)
@@ -104,10 +109,11 @@ def analyse_music(video, T, cuts=()):
     series = {"energy_db": r(energy_db, 1), "onset_density": r(onset_density, 1), "brightness": r(brightness, 3),
               "tempo_bpm": r(bpm, 1), "beat_strength": r(beat_strength), "mode": r(mode, 3),
               "harmonic_change": r(harm_change, 3)}
-    summary = {"tempo_bpm": round(tempo_global, 1), "beats": len(beats),
+    summary = {"tempo_bpm": round(tempo_global, 1), "tempo_halved": halved, "beats": len(beats),
                "beats_per_s": round(len(beats) / max(T, 1), 2),
                "mode_mean": round(float(mode.mean()), 3),
-               "mode_label": "major/brighter" if mode.mean() > 0.05 else "minor/darker" if mode.mean() < -0.05 else "mixed",
+               # key fit is a weak hint (unreliable on modal, melody-led music): only strong fits are labelled
+               "mode_label": "major/brighter" if mode.mean() > 0.2 else "minor/darker" if mode.mean() < -0.2 else "key unclear",
                "mode_swing": round(float(mode.max() - mode.min()), 3),
                "energy_range_db": round(float(np.percentile(energy_db, 95) - np.percentile(energy_db, 5)), 1),
                "onset_density_mean": round(float(onset_density.mean()), 2),

@@ -452,7 +452,13 @@ def finalize(report, extra):
         report["method"] += f"; partial modalities ({used}), diagnostic run"
     import emotion_fusion as EF
     import suggest as SG
-    block, efeat = EF.fuse(report, {**(extra or {}), "music_summary": (report.get("music") or {}).get("summary")})
+    block, efeat = EF.fuse(report, extra)
+    gate_r = (gate or {}).get("ratios") or {}
+    # production intent: music-only with a continuous score is a deliberate emotional steer
+    score_driven = bool(gate_r and gate_r.get("speech", 1) < 0.05 and gate_r.get("music", 0) >= 0.8)
+    report.setdefault("features", {})["score_driven"] = float(score_driven)
+    if report.get("music"):
+        report["music"]["summary"]["score_driven"] = score_driven
     if block:
         report["emotion"] = block
         report.setdefault("features", {}).update(efeat)

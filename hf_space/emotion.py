@@ -22,30 +22,8 @@ VOICE_REPO = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"  # CC-BY-NC
 TEXT_REPO = "SamLowe/roberta-base-go_emotions"
 MUSIC_REPO = "laion/clap-htsat-fused"  # Apache-2.0, safetensors (the music-only CLAPs are .bin)
 # Music mood prompts (two per mood); per-second softmax over moods from 4s windows.
-MUSIC_PROMPTS = {
-    "sad": ["sad emotional piano music", "melancholic slow strings"],
-    "uplifting": ["uplifting inspiring hopeful music", "emotional swelling music building to a climax"],
-    "epic": ["epic powerful cinematic music", "dramatic orchestral music"],
-    "tense": ["tense suspenseful music", "dark ominous music"],
-    "happy": ["happy upbeat cheerful music", "energetic pop dance music"],
-    "funny": ["comedic quirky funny music", "silly cartoon sound effects"],
-    "calm": ["calm relaxing ambient music", "soft peaceful background music"],
-    "none": ["people talking with no music", "silence"],
-}
 
-EMOTIONS = ["amusement", "awe", "surprise", "curiosity", "tension", "outrage", "warmth", "sadness"]
 # Two CLIP prompts per emotion plus a neutral anchor; scores are averaged per emotion.
-CLIP_PROMPTS = {
-    "amusement": ["a funny, hilarious moment", "people laughing at a joke"],
-    "awe": ["an awe-inspiring, amazing sight", "an impressive, breathtaking moment"],
-    "surprise": ["a shocking, surprising moment", "an unexpected twist"],
-    "curiosity": ["a mysterious, intriguing scene", "someone revealing a secret"],
-    "tension": ["a tense, scary moment", "a dangerous, nerve-wracking situation"],
-    "outrage": ["an angry, outrageous scene", "people arguing furiously"],
-    "warmth": ["a cute, heartwarming moment", "a loving, wholesome scene"],
-    "sadness": ["a sad, emotional moment", "someone crying"],
-    "neutral": ["an ordinary everyday scene", "a plain product shot"],
-}
 _M = {}
 
 
@@ -57,16 +35,16 @@ def _frames(video, out_dir, fps=1, width=640):
 
 
 def _clip(frames, device):
+    """Raw cosine similarity per frame to every taxonomy visual prompt (mapping to emotions is local)."""
+    import taxonomy as TX
     from transformers import CLIPModel, CLIPProcessor
     if "clip" not in _M:
         _M["clip"] = (CLIPModel.from_pretrained(CLIP_REPO, torch_dtype=torch.float32, use_safetensors=True)
-                      .eval().to(device),
-                      CLIPProcessor.from_pretrained(CLIP_REPO))
+                      .eval().to(device), CLIPProcessor.from_pretrained(CLIP_REPO))
     model, proc = _M["clip"]
-    labels = list(CLIP_PROMPTS)
-    texts = [t for k in labels for t in CLIP_PROMPTS[k]]
+    prompts = list(TX.VISUAL_PROMPTS)
     with torch.inference_mode():
-        tin = proc(text=texts, return_tensors="pt", padding=True).to(device)
+        tin = proc(text=prompts, return_tensors="pt", padding=True).to(device)
         tf = model.get_text_features(**tin)
         tf = tf / tf.norm(dim=-1, keepdim=True)
         out = []
@@ -74,11 +52,9 @@ def _clip(frames, device):
             iin = proc(images=frames[i:i + 32], return_tensors="pt").to(device)
             imf = model.get_image_features(**iin)
             imf = imf / imf.norm(dim=-1, keepdim=True)
-            sim = (imf @ tf.T).reshape(len(frames[i:i + 32]), len(labels), 2).mean(-1)
-            out.append(sim.float().cpu().numpy())
-    p = np.concatenate(out) if out else np.zeros((0, len(labels)))
-    # raw cosine similarities: a softmax here (x100) was one-hot and lost the nuance after rounding
-    return {"sim": {k: [round(float(x), 4) for x in p[:, j]] for j, k in enumerate(labels)}}
+            out.append((imf @ tf.T).float().cpu().numpy())
+    p = np.concatenate(out) if out else np.zeros((0, len(prompts)))
+    return {"prompt_sim": {k: [round(float(x), 4) for x in p[:, j]] for j, k in enumerate(prompts)}}
 
 
 def _voice(audio, sr, speech_prob, device):
@@ -127,19 +103,19 @@ def _voice(audio, sr, speech_prob, device):
 
 
 def _music(audio16k, n, device):
-    """CLAP zero-shot music mood per second (4s window centred on each second)."""
+    """Raw CLAP similarity per second (4s window) to every taxonomy music prompt."""
+    import taxonomy as TX
     from transformers import ClapModel, ClapProcessor
     import torchaudio.functional as AF
     if "music" not in _M:
         _M["music"] = (ClapModel.from_pretrained(MUSIC_REPO, torch_dtype=torch.float32, use_safetensors=True)
                        .eval().to(device), ClapProcessor.from_pretrained(MUSIC_REPO))
     model, proc = _M["music"]
-    moods = list(MUSIC_PROMPTS)
-    texts = [t for m in moods for t in MUSIC_PROMPTS[m]]
+    prompts = list(TX.MUSIC_PROMPTS)
     y = AF.resample(torch.from_numpy(np.asarray(audio16k, dtype=np.float32)), 16000, 48000).numpy()
     sr = 48000
     with torch.inference_mode():
-        tin = proc(text=texts, return_tensors="pt", padding=True).to(device)
+        tin = proc(text=prompts, return_tensors="pt", padding=True).to(device)
         tf = model.get_text_features(**tin)
         tf = tf / tf.norm(dim=-1, keepdim=True)
         clips = [y[max(0, int((t - 1.5) * sr)):int((t + 2.5) * sr)] for t in range(n)]
@@ -149,10 +125,9 @@ def _music(audio16k, n, device):
             ain = proc(audios=clips[i:i + 16], sampling_rate=sr, return_tensors="pt").to(device)
             af = model.get_audio_features(**ain)
             af = af / af.norm(dim=-1, keepdim=True)
-            sim = (af @ tf.T).reshape(len(clips[i:i + 16]), len(moods), 2).mean(-1)
-            out.append(sim.float().cpu().numpy())
-    p = np.concatenate(out) if out else np.zeros((0, len(moods)))
-    return {"sim": {m: [round(float(x), 4) for x in p[:, j]] for j, m in enumerate(moods)}}
+            out.append((af @ tf.T).float().cpu().numpy())
+    p = np.concatenate(out) if out else np.zeros((0, len(prompts)))
+    return {"prompt_sim": {k: [round(float(x), 4) for x in p[:, j]] for j, k in enumerate(prompts)}}
 
 
 def _text(segments, n, device):

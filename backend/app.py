@@ -234,7 +234,7 @@ def _chart_svg(r: dict) -> str:
     if em:  # emotion dots sit on the attention curve: colour = emotion, size = arousal
         s_ = em["series"]
         for i, (d, a_) in enumerate(zip(s_["dominant"], s_["arousal"])):
-            if d == "neutral" or i >= T:
+            if d in ("neutral", "calm") or i >= T:
                 continue
             size = 6 + 10 * float(a_)
             y = 100 - max(0, min(100, att[i]))
@@ -369,8 +369,7 @@ def report_video(job_id: str):
     return FileResponse(v, media_type="video/mp4")
 
 
-EMO_COLORS = {"moved": "#fb7185", "amusement": "#f5b301", "awe": "#7c3aed", "surprise": "#ec4899", "curiosity": "#06b6d4",
-              "tension": "#ef4444", "outrage": "#b91c1c", "warmth": "#22c55e", "sadness": "#3b82f6", "neutral": "#555"}
+EMO_COLORS = {'amusement': '#f5b301', 'excitement': '#f97316', 'awe': '#7c3aed', 'admiration': '#a78bfa', 'adoration': '#f9a8d4', 'satisfaction': '#2dd4bf', 'craving': '#d97706', 'surprise': '#ec4899', 'interest': '#06b6d4', 'nostalgia': '#c4b5fd', 'romance': '#e11d48', 'hope': '#84cc16', 'empathic_pain': '#fb7185', 'sadness': '#3b82f6', 'fear': '#ef4444', 'anger': '#b91c1c', 'disgust': '#65a30d', 'awkwardness': '#a3a3a3', 'moved': '#22c55e', 'laughter': '#f5b301', 'outrage': '#b91c1c', 'sorrow': '#3b82f6'}
 
 
 def _emotion_html(r: dict) -> str:
@@ -380,13 +379,14 @@ def _emotion_html(r: dict) -> str:
         return ""
     s = em["series"]
     T = len(s["arousal"]) or 1
-    cells = "".join(f'<i title="{_fmt_t(t)} {d} (arousal {a:.2f})" style="flex:1;background:{EMO_COLORS.get(d, "#555")};'
+    cells = "".join(f'<i title="{_fmt_t(t)} {d}" style="flex:1;background:{EMO_COLORS.get(d, "#555")};'
                     f'opacity:{0.15 + 0.85 * a:.2f}"></i>' for t, (d, a) in enumerate(zip(s["dominant"], s["arousal"])))
     sm = em["summary"]
     dom = ", ".join(f'{x["emotion"]} {x["share"]:.0%}' for x in sm.get("dominant_emotions", [])) or "mostly neutral"
     peaks = ", ".join(f'{_fmt_t(p["at_s"])} {p["emotion"]}' for p in sm.get("peak_moments", [])) or "none"
-    legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e}</span>' for e, c in EMO_COLORS.items()
-                     if e != "neutral")
+    shown = set(s["dominant"]) - {"neutral", "calm"}
+    legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e.replace("_", " ")}</span>'
+                     for e, c in EMO_COLORS.items() if e in shown)
     br = em.get("brain_salience_r")
     st = em.get("strong") or {}
     if st:
