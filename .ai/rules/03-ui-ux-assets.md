@@ -1,17 +1,22 @@
-# 03 — UI/UX + Report Assets
+# 03 — Report Surfaces (TUI, web report, md / png / json)
 
-## Status
-No Figma/Jira/Miro links provided. No Lottie files. No Excel feature map. This file governs the only UI surface: the generated report (`report.md` + `report.png` + `report.json` series). If design links arrive later, verify read tool first; if unreadable ask for exported images/PlantUML — never hallucinate components.
+No Figma / Lottie / Miro sources exist. The surfaces below are the product; all read the same `report.json`.
 
-## Report contract (from `hookline_report.py`, keep layout)
-- `report.md`: title `# Hookline report`, line `` `<name>`, <dur>s ``, bullets Hook/Hold/Finish/Virality with bands, one-line moments (`Peak hook at M:SS…`), `## What to change` bullets `- **<at>**, <issue>. <fix>`, footer `_heuristic, within-video normalised, uncalibrated_`.
-- `report.png` (12×9, gridspec 4 rows): row0 4 score cards (Hook/Hold/Finish/Virality + band sublabel); row1 attention blue solid + survival orange dashed, hook window green shade, drops red shade, cuts grey vlines, peak dots; row2 network heatmap `RdBu_r ±2.5` labeled per group; row3 top-6 recs text. `Agg` backend, `dpi=130`, `bbox_inches=tight`.
-- Time format `M:SS` via `fmt()`; windows `start-end`; attention 0–100 1-decimal; survival %.
-- Backend serving: `GET /report/{id}` returns `report.json` verbatim; render md as HTML with same order; png as-is. No restyling that drops timestamps/bands/method disclaimer.
+## TUI (`tui.py`, Textual)
+- Layout (fixed): header (backend status, run options `m`, Space stage `● live / ◐ starting / ○ paused / ✕ error`), left tree (demo, sample strata with page-size markers `! $ $$ $$$` next to views, your files, live on Space + "N queued here", saved reports latest first), right report pane, status line, footer.
+- Report pane: 4 tiles (Hook, Hold, Finish, Viral potential + tag) → attention strip (30% height, emotion dots ●) → moments, viral-potential factors + summary, audio / music / emotion / strong-emotion lines (+ audible laughter) → suggestions table → transcript.
+- Keys: Enter / `p` open saved report (never analyses), `a` analyze (queues if busy; works on saved reports), `o` system file picker → analyze, `v` web report, `R` all reports, `g` regenerate, `V` model-check suggestions, `m` run options modal (`v a t l` inside), `S` Space modal (ping / start / restart / stop; stop + restart need a second press), `x` stop job or remove from queue, `ctrl+r` restart job, `r` random reel, `?` help, `q` quit.
+- Progress view: step, substep, loop / chunk counters, ETA (chunk-based; "unknown" when no signal), speech-gate decision.
 
-## Component mapping (when frontend built)
-- Score cards → 4 stat tiles (value + band caption). Attention chart → line chart with shaded hook/drop zones + cut markers (data: `series.attention`, `series.survival_pct`, `series.cuts_s`). Network strip → heatmap rows (`network_mean_response` keys). Rec list → timeline rows keyed by `at`, each expandable to `fix`. Upload → `POST /analyze`; polling → `GET /report/{id}` status chip (`queued_colab_manual|done|failed`).
-- Copy rules: bands verbatim (`Bad/Weak/Average/Strong/Viral-grade`); never promise retention; always show method disclaimer near scores; recs keep timestamp prefix.
+## Web report (`/report/{id}/view`)
+- Order: title + file, speech gate / audio / song line, music line, tiles, video player + chart (SVG, 30vh; emotion dots with a playhead tooltip "time · emotion"), emotion band + strong line + emotion line, **Why viral potential N** (summary, factor table with diverging bars, total), editing suggestions (verify button, badges, variant players), transcript used for judging, method / virality disclaimer, JSON / Markdown links, Regenerate.
+- `/reports`: table (reel, run type, viral potential, hook, hold, finish, audio, length, analysed), sort dropdown (viral first default / latest / oldest), reloads every 5s except while the dropdown has focus. Lists only reports whose video exists and that are named after it.
 
-## Don’ts
-No follower/handle display as signal. No invented Figma components. No Lottie triggers (none exist). No new report fields without updating `analyse()` + md + png + backend schema together.
+## Markdown / PNG
+- `report.md`: scores, moments, drop zones, "Why this viral potential" table, footer method line. `report.png`: score cards, attention + survival chart, network heatmap.
+
+## Copy rules
+- Never promise retention: show the method disclaimer near scores ("heuristic, within-video normalised, uncalibrated"; avg second ≈ 50).
+- Emotions are "predicted, evoked for an average viewer; not a measured mood". Strong peaks are named by emotion (amusement, outrage, sorrow …), never "laughter" — audible laughter is its own line.
+- Every suggestion keeps its `M:SS-M:SS` prefix. Followers / handles appear only as page-size context, never next to scores as a cause.
+- New report fields: update `analyse()` / `finalize()` + md + web + TUI together.

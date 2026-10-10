@@ -17,7 +17,8 @@ import taxonomy as TX
 EMOTIONS = TX.NAMES
 AROUSAL = {e: TX.EMOTIONS[e][0] for e in EMOTIONS}
 VALENCE = {e: TX.EMOTIONS[e][1] for e in EMOTIONS}
-CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9}
+CHANNEL_WEIGHT = {"visual": 1.0, "text": 1.0, "sounds": 0.8, "music": 0.9, "face": 1.0}
+FACE_SMOOTH_S = 3  # face expression per frame jitters (happy 0.99 -> sad 0.97 a second later): 3s mean
 ZS_SCALE = {"visual": 40.0, "music": 40.0}  # softmax sharpness over raw similarities (no calibration yet)
 Z_SCALE = {"visual": 1.5, "music": 1.5}      # softmax sharpness over calibrated z-scores
 MIN_CAL_REELS = 15  # below this the reference set is too thin: one long reel would define "usual"
@@ -48,6 +49,11 @@ def _calibrated(S, prompts, channel):
 VISUAL_TEMPER = 0.5                          # for legacy probability cues only
 VISUAL_STRONG_WEIGHT = 0.5                   # visual alone (scene) can't make a strong peak
 STRONG_LEVEL, STRONG_PROMINENCE, STRONG_DROP, STRONG_FULL = 0.6, 0.15, 0.15, 0.30
+# In a speech reel the music is a bed under the talk: it colours the mood but does not carry the
+# emotion, so alone it must not make a strong peak (a quirky bed under a product review is not laughter).
+MUSIC_BED_WEIGHT = 0.5
+# GoEmotions is English-only; on Hinglish / Hindi transcripts its labels are unreliable.
+TEXT_NON_ENGLISH_WEIGHT = 0.5
 # legacy cue names (8-emotion version) -> taxonomy
 LEGACY = {"tension": "fear", "outrage": "anger", "curiosity": "interest", "warmth": "moved", "neutral": "calm"}
 LEGACY_MUSIC = {"sad": {"sadness": 1.0}, "uplifting": {"hope": 0.7, "moved": 0.3}, "epic": {"awe": 1.0},
@@ -127,6 +133,30 @@ def text_dist(text, n):
     return D if seen.any() else None
 
 
+def face_dist(cue, n):
+    """(n, len(EMOTIONS)) from per-frame expression probabilities, smoothed over FACE_SMOOTH_S seconds
+    (mean over the frames that have a face; seconds with no face nearby stay empty)."""
+    probs = _seconds((cue or {}).get("probs"), n)
+    if not any(probs):
+        return None
+    D = np.full((n, len(EMOTIONS)), np.nan)
+    for t, d in enumerate(probs):
+        if d:
+            row = np.zeros(len(EMOTIONS))
+            for lab, p in d.items():
+                for e, w in TX.FACE_MAP.get(lab, {}).items():
+                    row[EMOTIONS.index(e)] += w * p
+            D[t] = row
+    h = FACE_SMOOTH_S // 2
+    S = np.zeros((n, len(EMOTIONS)))
+    for t in range(n):
+        win = D[max(0, t - h):t + h + 1]
+        ok = ~np.isnan(win[:, 0])
+        if ok.sum() >= 2 or (ok.sum() == 1 and not np.isnan(D[t, 0])):
+            S[t] = win[ok].mean(0)
+    return S if S.any() else None
+
+
 def sound_dist(sounds, n):
     D = np.zeros((n, len(EMOTIONS)))
     for k, s in (sounds or {}).items():
@@ -137,12 +167,37 @@ def sound_dist(sounds, n):
     return D if D.any() else None
 
 
+def channel_trust(extra):
+    """Per-channel weights from what the reel is: music is a bed in speech reels, and the
+    transcript emotion model is only trusted on plain-English transcripts."""
+    extra = extra or {}
+    gate = extra.get("speech_gate") or {}
+    info = extra.get("transcript_info") or {}
+    english = info.get("model") not in (None, "hinglish") and info.get("lang") == "en" \
+        or extra.get("asr") == "whisper" and extra.get("lang") == "en"
+    return {"music": MUSIC_BED_WEIGHT if gate.get("audio_type") in ("speech", "speech_over_music") else 1.0,
+            "text": 1.0 if english else TEXT_NON_ENGLISH_WEIGHT}
+
+
+NO_MUSIC_RATIO = 0.1  # speech gate: below this share of music / singing / bed seconds the reel has no music
+
+
+def has_music(extra):
+    """False when the speech gate heard (almost) no music: CLAP still ranks its mood prompts on plain speech
+    and would invent a 'comedic' or 'mournful' score. True when unknown (no gate)."""
+    r = ((extra or {}).get("speech_gate") or {}).get("ratios")
+    if not r:
+        return True
+    return max(r.get("music", 0), r.get("vocals", 0), r.get("bed", 0), r.get("humming", 0)) >= NO_MUSIC_RATIO
+
+
 def channels(extra, n):
     cues = (extra or {}).get("emotion") or {}
     gate = (extra or {}).get("speech_gate") or {}
-    mus, mus_top = music_dist(cues.get("music"), n)
+    mus, mus_top = music_dist(cues.get("music"), n) if has_music(extra) else (None, None)
     ch = {"visual": visual_dist(cues.get("visual"), n), "music": mus,
-          "text": text_dist((cues.get("text") or {}).get("probs"), n), "sounds": sound_dist(gate.get("sounds_per_second"), n)}
+          "text": text_dist((cues.get("text") or {}).get("probs"), n), "sounds": sound_dist(gate.get("sounds_per_second"), n),
+          "face": face_dist(cues.get("face"), n)}
     voice = cues.get("voice") or {}
     va = np.array([x if x is not None else np.nan for x in _seconds(voice.get("arousal"), n)], dtype=float)
     vv = np.array([x if x is not None else np.nan for x in _seconds(voice.get("valence"), n)], dtype=float)
@@ -155,6 +210,7 @@ def fuse(report, extra):
     if n == 0:
         return None, {}
     ch, mus_top, va, vv = channels(extra, n)
+    trust = channel_trust(extra)
     used = [k for k, v in ch.items() if v is not None]
     if np.isfinite(va).any():
         used.append("voice")
@@ -164,7 +220,7 @@ def fuse(report, extra):
     dist = np.zeros((n, len(EMOTIONS)))
     for k, D in ch.items():
         if D is not None:
-            dist += CHANNEL_WEIGHT[k] * D
+            dist += CHANNEL_WEIGHT[k] * trust.get(k, 1.0) * D
     probs = dist / np.maximum(dist.sum(1, keepdims=True), 1e-9)
     intensity = 1.0 - probs[:, calm]                         # how emotional at all (vs calm baseline)
     emo = probs.copy()
@@ -187,7 +243,10 @@ def fuse(report, extra):
     if sal and len(sal) == n and np.std(arousal) > 1e-6 and np.std(sal) > 1e-6:
         brain_r = round(float(np.corrcoef(arousal, sal)[0, 1]), 3)
 
-    strong = strong_emotions(ch, va, n)
+    strong = strong_emotions(ch, va, n, trust)
+    # audible laughter (AST: laughter / giggle / chuckle in the audio track), separate from predicted amusement
+    laugh = _seconds(((extra or {}).get("speech_gate") or {}).get("sounds_per_second", {}).get("amusement"), n, 0.0)
+    strong["audible_laughter_s"] = int(sum(1 for x in laugh if (x or 0) > 0.3))
     feats = features(arousal, valence, emo, intensity, dominant, report)
     seq = []
     for d in dominant:
@@ -196,7 +255,7 @@ def fuse(report, extra):
     block = {
         "note": "predicted emotion the video evokes for an average viewer; not a measured mood",
         "taxonomy": "20 categories after Cowen & Keltner 2017 (emotions evoked by short videos)",
-        "channels": used, "brain_salience_r": brain_r,
+        "channels": used, "channel_trust": trust, "brain_salience_r": brain_r,
         "series": {"arousal": [round(float(x), 3) for x in arousal], "valence": [round(float(x), 3) for x in valence],
                    "dominant": dominant, "intensity": [round(float(x), 3) for x in intensity],
                    "probs": {e: [round(float(x), 3) for x in emo[:, j]] for j, e in enumerate(EMOTIONS) if e != "calm"}},
@@ -221,29 +280,30 @@ def fuse(report, extra):
     return block, out
 
 
-def strong_emotions(ch, voice_arousal, n):
+def strong_emotions(ch, voice_arousal, n, trust=None):
     """Peaks of intense emotions. Evidence per emotion = max over channels (visual at half weight,
     so a steady scene tone never qualifies); a lively voice backs high-arousal emotions in speech;
     'moved' also fires at a turn from suffering to hope / kindness. Only peaks that spike count."""
     from scipy.signal import find_peaks
     va = np.nan_to_num(voice_arousal)
+    trust = trust or {}
+    weight = lambda k: (VISUAL_STRONG_WEIGHT if k == "visual" else 1.0) * trust.get(k, 1.0)
     evidence = {}
     for e in TX.STRONG:
         j = EMOTIONS.index(e)
         parts = [np.zeros(n)]
         for k, D in ch.items():
             if D is not None:
-                parts.append((VISUAL_STRONG_WEIGHT if k == "visual" else 1.0) * np.clip(D[:, j], 0, 1))
+                parts.append(weight(k) * np.clip(D[:, j], 0, 1))
         if ch.get("text") is not None and AROUSAL[e] >= 0.65:
-            parts.append(0.6 * np.clip(ch["text"][:, j], 0, 1) + 0.4 * va)
+            parts.append(trust.get("text", 1.0) * (0.6 * np.clip(ch["text"][:, j], 0, 1) + 0.4 * va))
         evidence[e] = np.clip(np.max(parts, axis=0), 0, 1)
     # 'moved' at a turn: suffering in the last 12s resolving into hope / kindness in the next 4s
     neg = np.max([evidence["sadness"], evidence["empathic_pain"]], axis=0)
     pos = np.zeros(n)
     for k, D in ch.items():
         if D is not None:
-            w = VISUAL_STRONG_WEIGHT if k == "visual" else 1.0
-            pos = np.maximum(pos, w * np.clip(D[:, EMOTIONS.index("hope")] + D[:, EMOTIONS.index("moved")], 0, 1))
+            pos = np.maximum(pos, weight(k) * np.clip(D[:, EMOTIONS.index("hope")] + D[:, EMOTIONS.index("moved")], 0, 1))
     turn = np.array([min(neg[max(0, t - 12):t + 1].max(), pos[t:min(n, t + 5)].max()) * 1.4 for t in range(n)])
     evidence["moved"] = np.clip(np.maximum(evidence["moved"], turn), 0, 1)
 
@@ -269,7 +329,8 @@ def strong_emotions(ch, voice_arousal, n):
             "seconds": len(seconds), "share": round(share, 3),
             "score": round(100 * min(1.0, share / STRONG_FULL), 1),
             "max_evidence": {TX.STRONG_LABEL.get(e, e): round(float(v.max()), 2) for e, v in evidence.items()},
-            "definition": "peaks of laughter, awe, outrage, sorrow, being moved, fear, disgust, empathic pain"}
+            "definition": "predicted peaks of amusement, awe, outrage, sorrow, being moved, fear, disgust, "
+                          "empathic pain (evoked in the viewer, not sounds in the video)"}
 
 
 def features(arousal, valence, emo, intensity, dominant, report):

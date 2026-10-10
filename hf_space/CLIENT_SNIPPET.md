@@ -1,29 +1,21 @@
 # Calling the Space (plain REST)
 
-Base: `https://<your-space>.hf.space` (private Space → send `Authorization: Bearer $HF_TOKEN`).
+Base: `https://wlddhq-hookline-tribe.hf.space` (private Space → send `Authorization: Bearer $HF_TOKEN`).
+The TUI (`tui.py`) and `tribe/rerun_all.py` use exactly this flow.
 
 ```bash
-BASE=https://wlddhq-hookline-tribe.hf.space   # adjust to real Space id
-# 1. upload
-curl -H "Authorization: Bearer $HF_TOKEN" -F "video=@reel.mp4" $BASE/analyze
-# -> {"job_id":"abc123","status":"queued"}
-# 2. poll (a 28s reel takes minutes on T4)
-curl -H "Authorization: Bearer $HF_TOKEN" $BASE/report/abc123
-# 3. assets
-curl -H "Authorization: Bearer $HF_TOKEN" $BASE/report/abc123.png -o chart.png
+BASE=https://wlddhq-hookline-tribe.hf.space
+H="Authorization: Bearer $HF_TOKEN"
+# 1. upload (modalities + transcript mode + language)
+curl -H "$H" -F "video=@reel.mp4" "$BASE/analyze?video=1&audio=1&text=auto&lang=auto"
+# -> {"job_id":"abc123","estimate_s":...}
+# 2. live progress (step, chunk, ETA); ~2.5-2.8s of GPU per video-second on a100-large
+curl -H "$H" $BASE/jobs/abc123
+# 3. raw bundle once status == done (preds float16, times, words.tsv, meta.json with all channels)
+curl -H "$H" $BASE/jobs/abc123/raw -o raw.zip
+# 4. build the report locally (backend on :8000): fetch raw + score + replace older reports of this video
+curl -X POST "localhost:8000/import/abc123?video=/abs/path/reel.mp4&source_id=reel"
 ```
 
-Python (same flow the FastAPI backend uses in `backend/hf_client.py`):
-
-```python
-import os, time, requests
-BASE = os.environ["HOOKLINE_SPACE_URL"]
-H = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"}
-job = requests.post(f"{BASE}/analyze", files={"video": open("reel.mp4","rb")}, headers=H).json()["job_id"]
-while True:
-    r = requests.get(f"{BASE}/report/{job}", headers=H).json()
-    if "scores" in r: break
-    assert r.get("status") != "failed", r
-    time.sleep(15)
-# r is report.json schema + neural_source="tribev2-full (cuda)"
-```
+Stop / restart a running job: `POST $BASE/jobs/{id}/cancel`, `POST $BASE/jobs/{id}/restart` (no re-upload).
+`GET $BASE/report/{id}` still returns the Space's own fallback report (same schema), but the local import is the source of truth.

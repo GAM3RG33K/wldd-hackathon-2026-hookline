@@ -7,7 +7,7 @@ Layout (fixed, never moves):
     right    report: score tiles, attention strip, moments, timestamped fixes
     footer   key hints (full list behind ?)
 
-Talks to the local backend (localhost:8000, auto-started) for previews and
+Talks to the local backend (localhost:8000, auto-started) for saved reports and
 straight to the HF Space for full TRIBE runs. Run:  python3 tui.py
 """
 import csv
@@ -145,9 +145,19 @@ def page_marker(band):
     return PAGE_SIZE.get((band or "").strip(), ("?", "unknown page size"))
 
 
+def analysed_at(report_json):
+    """When the reel was analysed: the model output's time, not report.json's (re-scoring rewrites that)."""
+    d = report_json.parent
+    for f in (d / "raw" / "preds.npy", d / "preds.npy", report_json):  # preds are never rewritten
+        if f.exists():
+            return f.stat().st_mtime
+    return 0.0
+
+
 def saved_reports():
+    """Saved reports, latest analysis first (always, in the TUI)."""
     jobs = [p for p in OUT.glob("*/report.json") if p.stat().st_size > 100]
-    return sorted(jobs, key=lambda p: p.stat().st_mtime, reverse=True)
+    return sorted(jobs, key=analysed_at, reverse=True)
 
 
 def short_path(p):
@@ -425,35 +435,101 @@ class SpaceScreen(ModalScreen):
         self.app.space_action(verb, self)
 
 
+class RunOptions(ModalScreen):
+    """What a full TRIBE run uses. Disabled modalities never load their model on the Space."""
+
+    BINDINGS = [Binding("escape,m,enter", "dismiss", "Close"), Binding("v", "toggle('video')", "Video"),
+                Binding("a", "toggle('audio')", "Audio"), Binding("t", "toggle('text')", "Transcript"),
+                Binding("l", "lang", "Language")]
+    DEFAULT_CSS = """
+    RunOptions { align: center middle; }
+    RunOptions > Static { width: 64; height: auto; border: round $accent; padding: 1 2; background: $panel; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="ro-body")
+
+    def on_mount(self):
+        self.query_one("#ro-body").border_title = "Run options"
+        self.query_one("#ro-body").border_subtitle = "esc close"
+        self.render_opts()
+
+    def render_opts(self):
+        app = self.app
+        t = Text()
+        for key, label, name in (("v", "video", "video"), ("a", "audio", "audio")):
+            on = app.mods[name]
+            t.append(f" {key} ", "bold reverse")
+            t.append(f"  [{'x' if on else ' '}] {label}\n", "bold green" if on else "dim")
+        tm = app.text_mode
+        t.append(" t ", "bold reverse")
+        t.append(f"  [{ {'auto': 'a', 'on': 'x', 'off': ' '}[tm] }] transcript: {tm}\n",
+                 "bold green" if tm != "off" else "dim")
+        t.append(" l ", "bold reverse")
+        t.append(f"  language: {app.lang}  (auto = Hindi / English / Hinglish)\n\n", "bold")
+        t.append("Transcript auto: a speech gate decides per reel; songs and humming are\n"
+                 "scored on visuals + sound. Models for disabled inputs are never loaded.", "dim")
+        self.query_one("#ro-body", Static).update(t)
+
+    def action_toggle(self, key):
+        self.app.action_toggle(key)
+        self.render_opts()
+
+    def action_lang(self):
+        self.app.action_cycle_lang()
+        self.render_opts()
+
+
+def pick_video_file():
+    """System file picker for a video. Returns a path, "" if cancelled, or None if no picker exists."""
+    try:
+        if sys.platform == "darwin":
+            script = ['tell application "System Events"', "activate",
+                      'set f to choose file with prompt "Pick a reel to analyze" '
+                      'of type {"public.movie", "public.mpeg-4", "com.apple.quicktime-movie"}',
+                      "end tell", "POSIX path of f"]
+            r = subprocess.run(["osascript", *sum((["-e", line] for line in script), [])],
+                               capture_output=True, text=True)
+            return r.stdout.strip() if r.returncode == 0 else ""  # non-zero = cancelled
+        if shutil.which("zenity"):
+            r = subprocess.run(["zenity", "--file-selection", "--title=Pick a reel to analyze",
+                                "--file-filter=Videos | *.mp4 *.mov *.m4v *.webm"], capture_output=True, text=True)
+            return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 - fall back to typing the path
+        return None
+    return None
+
+
 HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
 
 [b]Try it in 3 steps[/b]
-  1. Pick a reel on the left (↑/↓; Enter opens a folder)
-  2. Press [b]Enter[/b] or [b]p[/b] for a preview report (seconds, runs locally)
+  1. Pick a reel on the left (↑/↓; Enter opens a folder), or press [b]o[/b] to pick your own video
+  2. A saved report opens on its own. No report yet? Press [b]a[/b] to analyze it on the GPU
   3. Read the scores, viral-potential tag and the attention chart
 
 [b]Keys[/b]
-  p        preview analysis (local, real audio/visual/speech signals)
-  f        full TRIBE brain model on the GPU Space (minutes)
-  o        analyse your own video file
+  Enter p  open the reel's saved report (nothing is analysed; new reports come from a)
+  a        analyze: full TRIBE brain model on the GPU Space (minutes), builds the report.
+           While a run is going, a (or picking a file with o) queues the video; it starts
+           when the current run ends. Works on reels, your files and saved reports
+  o        pick your own video (system file picker); analysis starts right away
+  v        view the selected report in the browser (video + chart + transcript)
   r        jump to a random sample reel
-  w        open the selected report in the browser (video + chart + transcript)
   R        open all reports in the browser (live list, refreshes every 5s)
   g        regenerate the selected report from its raw model output (current formulas)
   V        model-check the top 3 editing suggestions (renders each edit, runs it on the GPU)
-  v a t    toggle video / audio / transcript for full TRIBE runs
-  l        transcription language: auto (Hindi/English/Hinglish) / hi / en
+  m        run options: video / audio / transcript on or off, transcription language.
+           Transcript auto: a speech gate checks how much of the reel is speech; songs
+           and humming are scored on visuals + sound, not words
+  S        GPU Space: live status, ping / start / restart / stop (stop + restart ask twice)
+  x        stop the running Space job, or remove the selected video from the queue
+  ctrl+r   restart the running Space job (no re-upload, model stays loaded)
+  tab      switch between reels and report
+  ?        this help        q  quit
 
 [b]Page size[/b] (next to views; context only, never a scoring input)
   !  small creator 10k-50k    $  medium page 50k-200k
   $$ big creator 200k-1M      $$$ highest followers 1M+
-           transcript cycles auto / on / off. auto: a speech gate checks how much of the
-           reel is speech; songs and humming are scored on visuals + sound, not words
-  x        stop the running Space job (exits after the current item)
-  ctrl+r   restart the running Space job (no re-upload, model stays loaded)
-  tab      switch between reels and report
-  S        GPU Space: live status, ping / start / restart / stop (stop + restart ask twice)
-  ?        this help        q  quit
 
 [b]Reading the scores[/b]
   Scores are within-video, uncalibrated heuristics: the average second ≈ 50.
@@ -496,19 +572,16 @@ class Hookline(App):
     .section { margin-top: 1; text-style: bold; }
     """
     BINDINGS = [
-        Binding("p", "preview", "Preview"),
-        Binding("f", "full", "Full TRIBE"),
-        Binding("o", "own_file", "Your video"),
+        Binding("p", "preview", "Open report"),
+        Binding("a", "full", "Analyze"),
+        Binding("o", "own_file", "Pick video"),
         Binding("r", "random", "Random reel"),
-        Binding("w", "web", "Web view"),
+        Binding("v", "web", "View report"),
         Binding("R", "all_reports", "All reports"),
         Binding("g", "regenerate", "Regenerate", show=False),
         Binding("V", "verify", "Verify edits", show=False),
         Binding("x", "stop", "Stop job"),
-        Binding("v", "toggle('video')", "Video", show=False),
-        Binding("a", "toggle('audio')", "Audio", show=False),
-        Binding("t", "toggle('text')", "Transcript", show=False),
-        Binding("l", "cycle_lang", "Language", show=False),
+        Binding("m", "run_options", "Run options", show=False),
         Binding("ctrl+r", "restart", "Restart job", show=False),
         Binding("S", "space", "Space"),
         Binding("question_mark", "help", "Help"),
@@ -520,9 +593,11 @@ class Hookline(App):
         self.corpus = load_corpus()
         self.current = None  # tree node data of the selected item
         self.by_path = {}    # video path -> job id analysed this session
+        self.report_index = {}  # reel name -> newest saved report job (full TRIBE preferred)
         self.backend_ok = False
         self.token = ""
         self.space_run = None  # in-flight Space job: {d, sid, t0, last_ok, p}
+        self.queue = []        # analysis requests waiting for the running one: [{d, mods, text_mode, lang}]
         # Modalities for full TRIBE runs; disabled ones never load their model on the Space.
         self.mods = {"video": True, "audio": True, "text": True}
         # transcript: auto = speech gate decides per reel (songs/humming scored on visuals + sound)
@@ -591,12 +666,13 @@ class Hookline(App):
         self.call_after_refresh(setattr, tree, "cursor_line", 0)
 
     def refresh_saved(self, force=True):
-        paths = [p for p in saved_reports()[:40] if p.parent.name != "demo"]
+        paths = [p for p in saved_reports() if p.parent.name != "demo"]
         sig = tuple((p.parent.name, p.stat().st_mtime) for p in paths)
         if not force and sig == self._saved_sig:
             return
         self._saved_sig = sig
         self.saved_node.remove_children()
+        index = {}  # reel name (lowercase file stem) -> (is_full, job); newest first, full TRIBE wins
         for p in paths:
             try:
                 r = json.loads(p.read_text())
@@ -606,12 +682,19 @@ class Hookline(App):
                 # list only reports whose video still exists and that are named after it
                 if not video or not Path(video).is_file() or name in (None, "input", p.parent.name):
                     continue
+                full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
+                key = name.lower()
+                if key not in index or (full and not index[key][0]):
+                    index[key] = (full, p.parent.name)
+                if len(self.saved_node.children) >= 40:
+                    continue
                 label = Text(f"{name:<7}")
                 tag = s.get("virality_tag") or s.get("virality_band", "")
                 label.append(f"{s['virality']:>3.0f} {tag}", BAND_STYLE.get(tag, "dim"))
             except Exception:
                 continue
             self.saved_node.add_leaf(label, data={"kind": "saved", "job": p.parent.name})
+        self.report_index = {k: job for k, (_, job) in index.items()}
         self.saved_node.set_label(f"saved reports ({len(self.saved_node.children)})")
 
     def tick_saved(self):
@@ -651,6 +734,7 @@ class Hookline(App):
                                                                    "source": j.get("source")})
         self._live_sig = sig
         self.live_node.set_label(f"live on Space ({len(active)})")
+        self.update_queue_label()
 
     def _live_label(self, j):
         src = Path(j.get("source") or j["job_id"]).stem
@@ -683,13 +767,13 @@ class Hookline(App):
             s = Text(f"{glyph} {word}", style)
             s.append("  S", "bold")
         t = Text.assemble(("HOOKLINE", "bold"), ("  video in → attention preview before posting", "dim"))
-        mods = Text("   full run: ")
-        for key, name in (("video", "v video"), ("audio", "a audio"), ("text", "t transcript")):
+        mods = Text("   m run: ")
+        for key, name in (("video", "video"), ("audio", "audio"), ("text", "transcript")):
             on = self.mods[key]
             box = {"auto": "a", "on": "x", "off": " "}[self.text_mode] if key == "text" else ("x" if on else " ")
             mods.append(f"[{box}] {name}  ", "bold green" if on else "dim")
         if self.text_mode != "off":
-            mods.append(f"l {self.lang}  ", "bold")
+            mods.append(f"{self.lang}  ", "bold")
         right = Text.assemble(mods, "backend ", b, "   space ", s)
         if len(t) + len(right) + 3 > self.size.width:  # narrow terminal: drop the tagline
             t = Text("HOOKLINE", "bold")
@@ -756,6 +840,15 @@ class Hookline(App):
             ("   strongest ", "dim"), f"{fmt_t(sw[0])}-{fmt_t(sw[1])}",
             ("   weakest ", "dim"), f"{fmt_t(ww[0])}-{fmt_t(ww[1])}",
             ("   drops ", "dim"), drops)
+        vb = r["scores"].get("virality_breakdown") or []
+        if vb:  # why this viral potential: each factor's pull vs a typical reel (factor at 50)
+            moments.append("\nviral potential: ", "dim")
+            for i, x in enumerate(sorted(vb, key=lambda x: -abs(x["vs_typical"]))):
+                d = x["vs_typical"]
+                moments.append(("  " if i else "") + f"{x['label'].lower()} ", "bold" if i == 0 else "")
+                moments.append(f"{d:+.1f}", "green" if d >= 0 else "red")
+            if r["scores"].get("virality_summary"):
+                moments.append("\n" + r["scores"]["virality_summary"], "dim italic")
         line = audio_text(r.get("audio"), r.get("speech_gate"))
         if line:
             moments.append("\n")
@@ -789,6 +882,8 @@ class Hookline(App):
                 moments.append("\nstrong emotions: ", "dim")
                 moments.append(f"{parts} · {st.get('share', 0):.0%} of the reel · emotional strength "
                                f"{st.get('score', 0):.0f}/100", "bold")
+                if st.get("audible_laughter_s") is not None:
+                    moments.append(f" · audible laughter {st['audible_laughter_s']}s", "dim")
         self.query_one("#moments", Static).update(moments)
         tbl = Table(expand=True, box=None, show_header=True, header_style="dim", pad_edge=False)
         tbl.add_column("AT", style="bold green", no_wrap=True, width=10)
@@ -832,9 +927,10 @@ class Hookline(App):
             (d["id"], "bold"), (f"   {d.get('stratum', '')}\n\n", "dim"),
             (f"{views}{short_path(d['path'])}\n", "dim"),
             ("Views and page size are context only; scoring judges the video, never the account.\n\n", "dim italic"),
-            ("Enter / p", "bold"), "  preview report (seconds)\n",
-            ("f", "bold"), "          full TRIBE brain model on GPU Space (minutes)\n",
-            ("v a t", "bold"), "      toggle video / audio / transcript for the full run"))
+            ("No report yet for this reel.\n", "bold yellow"),
+            ("a", "bold"), "          analyze it: full TRIBE brain model on the GPU Space (minutes)\n",
+            ("m", "bold"), "          run options: video / audio / transcript, language\n",
+            ("S", "bold"), "          GPU Space status (start it here if it is paused)"))
 
     @on(Tree.NodeHighlighted)
     def highlighted(self, ev: Tree.NodeHighlighted):
@@ -857,11 +953,23 @@ class Hookline(App):
             if run and run["d"]["path"] == d["path"]:
                 self.show_progress(run, time.time() - run["last_ok"])
                 return
-            job = self.by_path.get(d["path"])
-            if job and (OUT / job / "report.json").exists():
+            job = self.report_for(d)
+            if job:
                 self.show_report(json.loads((OUT / job / "report.json").read_text()), job, d["id"])
             else:
                 self.show_reel_card(d)
+            pos = self.queue_pos(d)
+            if pos:
+                self.say(f"{d['id']} is queued (#{pos}) behind {self.space_run['d']['id'] if self.space_run else 'the current run'}."
+                         " x removes it from the queue.", "cyan")
+
+    def report_for(self, d):
+        """Saved report job for a reel or file, or None: this session's run, else the index by file name."""
+        for job in (self.by_path.get(d["path"]), self.report_index.get(Path(d["path"]).stem.lower()),
+                    self.report_index.get(str(d.get("id", "")).lower())):
+            if job and (OUT / job / "report.json").exists():
+                return job
+        return None
 
     @on(Tree.NodeSelected)
     def selected(self, ev: Tree.NodeSelected):
@@ -871,15 +979,42 @@ class Hookline(App):
     # ---- actions
     def target(self):
         d = self.current
+        if d and d.get("kind") == "saved":  # a saved report: act on the video it was made from
+            d = self.video_of_report(d["job"]) or d
         if not d or d.get("kind") not in ("reel", "file"):
-            self.say("Select a reel or your own file first (o adds one).", "yellow")
+            self.say("Select a reel, your own file or a saved report first (o picks a file).", "yellow")
             return None
         return d
 
+    def video_of_report(self, job):
+        """The reel/file a saved report belongs to, as a tree item (sample reel if it is one)."""
+        try:
+            r = json.loads((OUT / job / "report.json").read_text())
+        except (OSError, ValueError):
+            return None
+        video = r.get("local_video")
+        if not video or not Path(video).is_file():
+            self.say(f"The video for report {job} is no longer on disk.", "yellow")
+            return None
+        name = r.get("source_id") or Path(video).stem
+        for items in self.corpus.values():
+            for v in items:
+                if v["id"].lower() == name.lower():
+                    return {"kind": "reel", **v}
+        return {"kind": "file", "id": name, "path": video, "stratum": "your file"}
+
     def action_preview(self):
+        """Open the reel's saved report. Nothing is analysed here: new reports come from `a`."""
         d = self.target()
-        if d:
-            self.run_preview(d)
+        if not d:
+            return
+        job = self.report_for(d)
+        if job:
+            self.show_report(json.loads((OUT / job / "report.json").read_text()), job, d["id"])
+            self.say(f"Report for {d['id']} ({job}). v views it in the browser, a re-runs the analysis.")
+        else:
+            self.show_reel_card(d)
+            self.say(f"No report for {d['id']} yet. Press a to analyze it and build the report.", "yellow")
 
     def action_full(self):
         d = self.target()
@@ -888,47 +1023,79 @@ class Hookline(App):
         if not self.token:
             self.say("No HF token: run `hf auth login` or export HF_TOKEN, then restart.", "yellow")
             return
-        if self.space_run:
-            self.say(f"Space is busy with {self.space_run['d']['id']}; one full run at a time.", "yellow")
+        if self.space_run or self.queue:
+            self.enqueue(d)
             return
-        self.run_space(d)
+        stage = self.space_rt.get("stage")
+        if stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR"):
+            word = STAGE_VIEW.get(stage, ("", (stage or "").lower(), ""))[1]
+            self.say(f"GPU Space is {word}: press S to start it, then a to analyze {d['id']}.", "yellow")
+            return
+        if self.report_for(d):
+            self.say(f"Re-analyzing {d['id']}; the new report replaces the current one when it finishes.")
+        self.begin_run(d, {"mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang})
 
-    @work(thread=True, exclusive=True, group="analyse")
-    def run_preview(self, d):
-        if not self.backend_ok and not self.backend_alive():
-            self.call_from_thread(self.say, "Backend not up yet, try again in a moment.", "yellow")
+    def enqueue(self, d):
+        """Queue an analysis behind the running one, with the run options as they are now."""
+        running = self.space_run["d"]["path"] if self.space_run else None
+        if d["path"] == running or any(q["d"]["path"] == d["path"] for q in self.queue):
+            pos = next((i + 1 for i, q in enumerate(self.queue) if q["d"]["path"] == d["path"]), 0)
+            self.say(f"{d['id']} is already " + (f"queued (#{pos})." if pos else "being analyzed."), "yellow")
             return
-        self.call_from_thread(self.say, f"Analysing {d['id']} (preview) …")
-        t0 = time.time()
-        try:
-            res = post_video(BACKEND + "/analyze?mode=preview", d["path"])
-        except urllib.error.HTTPError as e:
-            self.call_from_thread(self.say, f"Preview failed: {e.read().decode()[:200]}", "red")
+        self.queue.append({"d": d, "mods": dict(self.mods), "text_mode": self.text_mode, "lang": self.lang})
+        now = self.space_run["d"]["id"] if self.space_run else "the current run"
+        self.say(f"Queued {d['id']} (#{len(self.queue)}): starts after {now}. x on a queued item removes it.", "cyan")
+        self.update_queue_label()
+
+    def update_queue_label(self):
+        n = len(self.queue)
+        base = str(self.live_node.label).split(" · ")[0]
+        self.live_node.set_label(base + (f" · {n} queued here" if n else ""))
+
+    def queue_pos(self, d):
+        return next((i + 1 for i, q in enumerate(self.queue) if q["d"]["path"] == (d or {}).get("path")), 0)
+
+    def start_next(self):
+        """Called when a run ends (done, failed, stopped): start the next queued request."""
+        if self.space_run or not self.queue:
             return
-        except Exception as e:
-            self.call_from_thread(self.say, f"Preview failed: {e}", "red")
+        stage = self.space_rt.get("stage")
+        if stage in ("PAUSED", "STOPPED") or str(stage).endswith("_ERROR"):
+            self.say(f"{len(self.queue)} queued, but the GPU Space is {stage.lower()}: press S to start it, "
+                     "then a to resume the queue.", "yellow")
             return
-        job = res["job_id"]
-        self.by_path[d["path"]] = job
-        self.call_from_thread(self.show_report, res["report"], job, d["id"])
-        self.call_from_thread(self.refresh_saved)
-        self.call_from_thread(self.say, f"Preview ready in {time.time() - t0:.0f}s · job {job} · w opens web view",
-                              "green")
+        q = self.queue.pop(0)
+        self.update_queue_label()
+        self.begin_run(q["d"], q)
+
+    def begin_run(self, d, opts):
+        """Mark the Space busy right away (the upload itself can take a while), then start the worker."""
+        self.space_run = {"d": d, "sid": None, "t0": time.time(), "last_ok": time.time(), "mods": dict(opts["mods"]),
+                          "p": {"status": "uploading", "stage_label": "Uploading to the GPU Space", "step": 0, "steps": 4}}
+        self.run_space(d, opts)
 
     @work(thread=True, group="space")
-    def run_space(self, d):
+    def run_space(self, d, opts):
+        try:
+            self._space_job(d, opts)
+        finally:
+            self.space_run = None
+            self.call_from_thread(self.start_next)
+
+    def _space_job(self, d, opts):
         """Upload to the Space, then poll its progress API every POLL_S until done/failed."""
         tok = self.token
         mb = Path(d["path"]).stat().st_size / 1e6
         self.call_from_thread(self.say, f"Uploading {d['id']} ({mb:.1f}MB) to GPU Space …")
         try:
-            q = f"video={int(self.mods['video'])}&audio={int(self.mods['audio'])}&text={self.text_mode}&lang={self.lang}"
+            m = opts["mods"]
+            q = f"video={int(m['video'])}&audio={int(m['audio'])}&text={opts['text_mode']}&lang={opts['lang']}"
             res = post_video(f"{SPACE}/analyze?{q}", d["path"], token=tok)
         except Exception as e:
             self.call_from_thread(self.say, f"Space upload failed: {e}", "red")
             return
         sid = res["job_id"]
-        run = {"d": d, "sid": sid, "t0": time.time(), "last_ok": time.time(), "mods": dict(self.mods), "p": {
+        run = {"d": d, "sid": sid, "t0": time.time(), "last_ok": time.time(), "mods": dict(opts["mods"]), "p": {
             "status": "queued", "stage_label": "Waiting for the GPU", "step": 0, "steps": 4,
             "eta_s": res.get("estimate_s"), "video_s": res.get("video_s")}}
         self.space_run = run
@@ -971,7 +1138,7 @@ class Hookline(App):
             if r.get("status") == "cancelled":
                 self.space_run = None
                 self.call_from_thread(self.say, f"Stopped Space job {sid} in {r.get('stage')}. "
-                                                "f starts a new run.", "yellow")
+                                                "a starts a new run.", "yellow")
                 return
             if r.get("status") == "failed":
                 self.space_run = None
@@ -993,7 +1160,7 @@ class Hookline(App):
         if loops:
             lp = loops[-1]
             where += f" [{lp['name']} {lp.get('n', 0)}/{lp.get('total') if lp.get('total') is not None else '?'}]"
-        msg = (f"Space {run['sid']} · step {p.get('step', 0)}/{p.get('steps', 4)} {where} · "
+        msg = (f"Space {run['sid'] or '(uploading)'} · step {p.get('step', 0)}/{p.get('steps', 4)} {where} · "
                f"{fmt_dur(el)} elapsed · {eta_text(p)} · timeout {fmt_dur(p.get('timeout_s'))}")
         style = ""
         if silent > 30:
@@ -1025,7 +1192,7 @@ class Hookline(App):
         filled = int(frac * width)
         mods = p.get("modalities") or run.get("mods") or {}
         used = " + ".join(k for k, v in mods.items() if v) or "?"
-        t = Text.assemble((d["id"], "bold"), (f"   full TRIBE on GPU Space · job {run['sid']} · {used}\n\n", "dim"))
+        t = Text.assemble((d["id"], "bold"), (f"   full TRIBE on GPU Space · job {run['sid'] or 'uploading'} · {used}\n\n", "dim"))
         t.append("━" * filled, "cyan")
         t.append("━" * (width - filled), "dim")
         t.append(f"  {frac * 100:3.0f}%\n", "bold")
@@ -1143,19 +1310,34 @@ class Hookline(App):
         self.lang = order[(order.index(self.lang) + 1) % len(order)]
         self.set_header()
         what = {"auto": "auto-detect (Hindi, English, Hinglish)", "hi": "Hindi", "en": "English"}[self.lang]
-        self.say(f"Transcription language: {what}" + ("" if self.mods["text"] else " (turn transcript on with t)"))
+        self.say(f"Transcription language: {what}" + ("" if self.mods["text"] else " (turn transcript on in run options, m)"))
 
     def action_stop(self):
+        d = self.current
+        if d and d.get("kind") == "saved":
+            d = self.video_of_report(d["job"])
+        pos = self.queue_pos(d)
+        if pos:
+            self.queue.pop(pos - 1)
+            self.update_queue_label()
+            self.say(f"Removed {d['id']} from the queue ({len(self.queue)} left).", "yellow")
+            return
         run = self.space_run
         if not run:
             self.say("No Space job running.", "yellow")
+            return
+        if not run["sid"]:
+            self.say(f"{run['d']['id']} is still uploading; stop it once it shows progress.", "yellow")
             return
         self.space_call("cancel", run["sid"])
 
     def action_restart(self):
         run = self.space_run
         if not run:
-            self.say("No Space job running; press f to start one.", "yellow")
+            self.say("No Space job running; press a to start one.", "yellow")
+            return
+        if not run["sid"]:
+            self.say(f"{run['d']['id']} is still uploading.", "yellow")
             return
         self.space_call("restart", run["sid"])
 
@@ -1180,22 +1362,34 @@ class Hookline(App):
             self.call_from_thread(self.say, f"Restarted as {r['job_id']} (same upload, model stays loaded)", "green")
 
     def action_own_file(self):
-        def add(raw):
-            if not raw:
-                return
-            p = Path(os.path.expanduser(raw))
-            if not p.is_file() or p.suffix.lower() not in VIDEO_EXT:
-                self.say(f"Not a video file: {raw}", "red")
-                return
-            d = {"kind": "file", "id": p.stem, "path": str(p), "stratum": "your file"}
-            node = self.own_node.add_leaf(p.name, data=d)
-            self.own_node.expand()
-            self.query_one("#reels", Tree).move_cursor(node)
-            self.current = d
-            self.show_reel_card(d)
-            self.say("Added. Press p for preview or f for full TRIBE.")
+        """System file picker (typed path as fallback); the picked video goes straight to analysis."""
+        self.say("Opening the file picker …")
+        self.pick_file()
 
-        self.push_screen(PathPrompt(), add)
+    @work(thread=True, exclusive=True, group="picker")
+    def pick_file(self):
+        path = pick_video_file()
+        if path is None:  # no system picker: type or drag the path instead
+            self.call_from_thread(self.push_screen, PathPrompt(), self.add_own_file)
+        elif not path:
+            self.call_from_thread(self.say, "No file picked.", "dim")
+        else:
+            self.call_from_thread(self.add_own_file, path)
+
+    def add_own_file(self, raw):
+        if not raw:
+            return
+        p = Path(os.path.expanduser(raw.strip().strip("'\""))).resolve()
+        if not p.is_file() or p.suffix.lower() not in VIDEO_EXT:
+            self.say(f"Not a video file: {raw}", "red")
+            return
+        d = {"kind": "file", "id": p.stem, "path": str(p), "stratum": "your file"}
+        node = next((n for n in self.own_node.children if (n.data or {}).get("path") == str(p)), None) \
+            or self.own_node.add_leaf(p.name, data=d)
+        self.own_node.expand()
+        self.query_one("#reels", Tree).move_cursor(node)
+        self.current = d
+        self.action_full()  # analyze right away (uploads to the GPU Space)
 
     def action_random(self):
         import random
@@ -1256,6 +1450,9 @@ class Hookline(App):
 
     def action_help(self):
         self.push_screen(HelpScreen())
+
+    def action_run_options(self):
+        self.push_screen(RunOptions())
 
     # ---- GPU Space status + control
     def action_space(self):

@@ -221,6 +221,29 @@ def neural_series(preds):
 
 
 # ---------------------------------------------------------------- scoring
+VIRALITY_WEIGHTS = {"hook": 0.40, "drop_free": 0.25, "strong_moments": 0.20, "ending": 0.15}
+TYPICAL = 50.0  # a component at 50/100 is "typical": points above / below that explain the score
+
+
+def virality_breakdown(hook, drop_share, peak_share, ending):
+    """Each interim virality term on a 0-100 scale, its points, and its pull vs a typical (50) value."""
+    parts = [
+        ("hook", "Hook (first 3s)", hook, f"attention in the first 3s scores {hook:.0f}/100"),
+        ("drop_free", "Few drop-offs", (1 - drop_share) * 100,
+         f"{1 - drop_share:.0%} of the reel stays out of drop zones, where attention sits under 35 for 2s+"),
+        ("strong_moments", "Strong-attention moments", min(100.0, 200 * peak_share),
+         f"{peak_share:.0%} of seconds at attention 70+ (full marks at 50%)"),
+        ("ending", "Ending", ending, f"attention in the last 3s averages {ending:.0f}/100"),
+    ]
+    out = []
+    for key, label, value, why in parts:
+        w = VIRALITY_WEIGHTS[key]
+        out.append({"key": key, "label": label, "value": round(float(value), 1), "weight": w,
+                    "points": round(float(w * value), 1), "vs_typical": round(float(w * (value - TYPICAL)), 1),
+                    "explain": why})
+    return out
+
+
 def analyse(out_dir, video=None):
     out_dir = Path(out_dir)
     meta = json.loads((out_dir / "meta.json").read_text())
@@ -372,15 +395,18 @@ def analyse(out_dir, video=None):
         pass
     if VIRALITY_MODEL:
         m = VIRALITY_MODEL
-        z = m["bias"] + sum(w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k])
-                            for k, w in m["weights"].items())
-        virality = float(100 * sigmoid(z))
+        terms = {k: w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k]) for k, w in m["weights"].items()}
+        virality = float(100 * sigmoid(m["bias"] + sum(terms.values())))
         virality_method = m["label"]
+        breakdown = [{"key": k, "label": k.replace("_", " "), "value": round(float(features.get(k) or 0.0), 3),
+                      "weight": round(w, 3), "points": None, "vs_typical": round(float(t), 2),
+                      "explain": "fitted model term (standardised feature x weight)"} for k, t in terms.items()
+                     for w in [m["weights"][k]]]
     else:
         # Interim, uncalibrated: no constant term (avg attention is ~50 by design) and no
         # length penalty (hold). Hook, how much of the video avoids drops, strong moments, ending.
-        virality = float(0.40 * hook + 0.25 * (1 - drop_share) * 100
-                         + 0.20 * min(100.0, 200 * features["peak_share"]) + 0.15 * features["ending"])
+        breakdown = virality_breakdown(hook, drop_share, features["peak_share"], features["ending"])
+        virality = float(sum(b["points"] for b in breakdown))
         virality_method = "interim heuristic, uncalibrated (hook, drop-free share, strong moments, ending)"
     result = {
         "video": str(video), "duration_s": round(dur, 2), "method": "heuristic, within-video normalised, uncalibrated",
@@ -389,7 +415,7 @@ def analyse(out_dir, video=None):
             "hold_rate_pct": round(min(hold, 100), 1), "finish_pct": round(finish, 1),
             "avg_attention": round(float(A.mean()), 1), "virality": round(virality, 1),
             "virality_band": band(virality), "virality_tag": virality_tag(virality),
-            "virality_method": virality_method,
+            "virality_method": virality_method, "virality_breakdown": breakdown,
         },
         "features": features,
         "moments": {
@@ -418,6 +444,21 @@ def analyse(out_dir, video=None):
 
 
 # ---------------------------------------------------------------- output
+def virality_summary(sc):
+    """One plain sentence: what pushed this reel's viral potential up most, and what held it back most."""
+    b = [x for x in sc.get("virality_breakdown") or [] if x.get("vs_typical") is not None]
+    if not b:
+        return ""
+    up = max(b, key=lambda x: x["vs_typical"])
+    down = min(b, key=lambda x: x["vs_typical"])
+    s = []
+    if up["vs_typical"] > 0.5:
+        s.append(f"Biggest boost: {up['label']}, {up['vs_typical']:+.1f} points vs a typical reel ({up['explain']}).")
+    if down["vs_typical"] < -0.5:
+        s.append(f"Biggest drag: {down['label']}, {down['vs_typical']:+.1f} points ({down['explain']}).")
+    return " ".join(s) or "No single factor stands out: every part sits near a typical reel."
+
+
 def finalize(report, extra):
     """Merge what the GPU Space knows (modalities, speech gate, transcript, audio match) into a
     scored report. Shared by the Space and the local re-scorer so both build identical reports."""
@@ -470,7 +511,17 @@ def finalize(report, extra):
             v = base + EMO_LIFT * (strength / 100.0) * (100 - base)
             sc.update(virality_base=base, virality=round(v, 1), virality_band=band(v), virality_tag=virality_tag(v),
                       virality_method=sc.get("virality_method", "") + f"; + strong-emotion lift ({strength:.0f}/100)")
+            if strength > 0:
+                st = block["strong"]
+                kinds = ", ".join(e for e, d in (st.get("durations_s") or {}).items() if d) or "strong emotion"
+                lift = round(v - base, 1)
+                sc.setdefault("virality_breakdown", []).append({
+                    "key": "emotion_lift", "label": "Emotional peaks", "value": round(float(strength), 1),
+                    "weight": EMO_LIFT, "points": lift, "vs_typical": lift,
+                    "explain": f"{kinds} peaks cover {st.get('share', 0):.0%} of the reel; strength {strength:.0f}/100 "
+                               f"closes {EMO_LIFT * strength / 100:.0%} of the gap to 100"})
     report["suggestions"] = SG.suggest(report)
+    report["scores"]["virality_summary"] = virality_summary(report["scores"])
     return report
 
 
@@ -486,6 +537,13 @@ def write_md(r, path):
              f"weakest {fmt(m['weakest_window_s'][0])}-{fmt(m['weakest_window_s'][1])}.", ""]
     drops = ", ".join(f"{fmt(a)}-{fmt(b)}" for a, b in m.get("drop_zones_s", [])) or "none"
     lines += [f"Drop zones: {drops}.", ""]
+    if s.get("virality_breakdown"):
+        lines += ["## Why this viral potential", "", s.get("virality_summary", ""), "",
+                  "| Factor | Score | Weight | Points | vs typical reel |", "|---|---|---|---|---|"]
+        for b in s["virality_breakdown"]:
+            pts = "" if b["points"] is None else f"{b['points']:.1f}"
+            lines.append(f"| {b['label']} | {b['value']:.0f} | {b['weight']} | {pts} | {b['vs_typical']:+.1f} |")
+        lines.append("")
     if SHOW_SUGGESTIONS:
         lines += ["## What to change", ""]
     for x in (r["recommendations"] if SHOW_SUGGESTIONS else []):

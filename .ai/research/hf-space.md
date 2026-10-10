@@ -1,10 +1,8 @@
-# HF Space — full neural backend (decision 2026-10-10, replaces Colab)
+# HF Space — GPU backend (decisions 2026-10-10/11, replaces Colab)
 
-- Choice: Docker Space + Gradio (`hf_space/`), one `analyze` endpoint (queue, concurrency 1).
-  Serverless Inference Providers rejected (custom TRIBE code + gated Llama + minute-long runs).
-  Inference Endpoints rejected for prototype (cost from minute one, no demo URL).
-- Target: `harshvardhan-joshi/hookline-tribe` (org `wlddhq` 403 on create with current token), private, `t4-small` ($0.40/hr).
-- Space files: `Dockerfile` (py3.11, ffmpeg, cu121 torch, tribev2 git, faster-whisper), `app.py` (model warm at startup, `analyze` → report dict + png + md), `tribe_analyze.py` + `hookline_report.py` vendored copies, `CLIENT_SNIPPET.md`.
-- Backend: `backend/hf_client.py` (`gradio_client`, `HOOKLINE_SPACE_ID`/`HF_TOKEN` env), `POST /analyze?mode=hf` (502 + error if Space unreachable), `/health` shows `hf_space` + `hf_configured`.
-- Secrets needed on Space: `HF_TOKEN` (account with Llama-3.2-3B access) for gated text encoder.
-- Blocker: CLI authed via browser OAuth with no stored token (`hf auth list` empty) → repo create 403 on org AND personal. Unblock: fine-grained write token → `hf auth login` → `hf repos create` + `hf upload` + secrets + hardware.
+- Space `wlddhq/hookline-tribe`, Docker + FastAPI (not Gradio), private. Hardware a100-large ($2.50/hr), sleep 1800s. t4-small took ~20 min for a 28s reel; A100 ~2.5–2.8s of GPU per video-second end to end.
+- Speed work: fp16 autocast, resident models (`KEEP_GB=4`, OOM → free + retry), 10s chunks (Wav2Vec-BERT OOM), transcribe before chunking (upstream duplicated words n-fold), cooperative cancel, per-step timing and chunk-based ETA.
+- Pins that matter: torch 2.5.1 (transformers ≥5 needs torch ≥2.6 → pin `<5`; `.bin` weights refused → safetensors-only models), torchvision imported on the main thread (circular import), non-root HOME/caches in `/tmp`, spaCy model installed at build.
+- Emotion models warm at boot (`boot.emotion_models`); face channel adds OpenCV + YuNet ONNX (<1s per reel on GPU, 88 frames in 5.7s on a Mac CPU).
+- Deploy: `hf upload wlddhq/hookline-tribe hf_space . --repo-type space --exclude "__pycache__/*"`; ~10–15 min build; wait for `RUNNING` (`RUNNING_BUILDING` = old container still serving).
+- Secrets: `HF_TOKEN` (Llama-3.2-3B access). Local token via `hf auth token`, never committed.

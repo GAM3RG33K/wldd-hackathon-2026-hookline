@@ -1,29 +1,34 @@
 # Hookline — demo cues
 
 ## Before
-- `./run-demo.sh` (installs deps once, starts backend, opens TUI on demo report)
-- Browser fallback tabs: `localhost:8000`, `/report/demo/view`
-- Have `tribe/samples/sneaker.mp4` ready (not in git; copy in)
+- Wake the GPU Space ~5 min early: `./run-demo.sh` → `S` → `s` (start). Header shows `space ● live`.
+- Pick 2–3 reels with fresh full-TRIBE reports (TUI "saved reports", latest first): one emotional (FL041), one comedy (rajpsych_2), one product review.
+- Browser tabs: `localhost:8000/reports` (sort dropdown: viral / latest / oldest), one `/report/<id>/view`.
+- After the demo: `S` → `x` twice (pauses the Space, stops billing), or it sleeps after 30 min idle.
 
 ## 0:00 Problem
-- Creators learn a video failed after posting
-- Hookline previews attention second-by-second; judges video, not account
+- Creators learn a video failed after posting.
+- Hookline predicts second-by-second attention before posting; judges the video, never the account.
 
-## 0:02 Live upload
-- TUI: arrow to a reel, Enter → preview report in ~3s; `w` opens web view
-- Own file: `o`, paste path; `f` = full TRIBE on GPU Space (minutes)
-- Anything fails → `★ Demo report` in tree, or `/report/demo/view`
-- Say: FastAPI front door, real ffmpeg signals now, full TRIBE pass runs on HF GPU Space, same JSON
+## 0:02 Live
+- TUI: arrow to a reel; its saved report opens (Enter / `p`). `v` opens the web report.
+- No report yet → "press a". `a` = analyze on the GPU Space (progress, chunk, ETA live). More requests queue up.
+- Own file: `o` opens the file picker; analysis starts on pick. `m` run options (video / audio / transcript, language).
+- Anything fails → `★ Demo report` in the tree, or any saved report.
 
 ## 0:06 Report
-- Scores: Hook 61, Hold ~35%, Finish ~22%, Virality ~50; within-video heuristic, avg second ≈ 50
-- Chart: strongest ~0:14, weakest ~0:10, drops 0:09–0:13 + end
-- Recs: static open → cut/zoom first 2s; no early speech → payoff in second 1; drops → re-hook; weak end → payoff/loop
+- Tiles: Hook, Hold, Finish, Viral potential + tag. Within-video heuristic, avg second ≈ 50, uncalibrated.
+- Chart (30% height): attention, viewers remaining, hook window, drop zones, strongest window, cuts; emotion dots follow the playhead.
+- "Why viral potential N": biggest boost and biggest drag, each factor's pull vs a typical reel.
+- Emotion: predicted feeling of the viewer (scenes, faces, music, voice, words); strong peaks only when they spike. Audible laughter counted separately.
+- Editing suggestions: timestamped, evidence vs the reel's own best part; `V` model-checks the top 3 on the GPU.
+- Transcript used for judging (Hinglish ASR; songs / humming skip the transcript).
 
 ## 0:11 Architecture
-- Video → events (audio+words) → TRIBE (T,20484) → neural + signal index → scores → report.json/md/png
-- Local = preview; HF Space T4 = full neural; `POST /analyze → GET /report/{id}` schema fixed
+- TUI uploads → HF Space (A100) runs TRIBE v2 + ASR + speech gate + emotion channels → raw bundle → local backend builds the report.
+- Formulas change locally: `g` regenerates a report from raw output, no GPU. See `ARCHITECTURE.md`.
 
 ## 0:13 Trust + close
-- Validate on 110-reel corpus, fit CFG vs views within strata; handles/followers = strata only
-- Ask: try your reel
+- Validated on the hackathon reel set (outliers vs low-view); virality weights fit is a dry run (LOO 65%), not applied.
+- Handles / followers = page-size context only, never inputs.
+- Ask: try your reel.

@@ -397,10 +397,12 @@ def _emotion_html(r: dict) -> str:
     st = em.get("strong") or {}
     if st:
         parts = [f'{e} {d}s' for e, d in (st.get("durations_s") or {}).items() if d]
-        strong_line = (f'<p><b>Strong emotions</b> (peaks of laughter, awe, outrage, sorrow): '
+        laugh = st.get("audible_laughter_s")
+        laugh_txt = "" if laugh is None else f' · audible laughter in the audio: {laugh}s' if laugh else ' · no audible laughter in the audio'
+        strong_line = (f'<p><b>Strong emotions</b> (predicted peaks the viewer feels: amusement, awe, outrage, sorrow): '
                        f'{html.escape(", ".join(parts)) if parts else "none detected"} · '
                        f'{st.get("seconds", 0)}s of {T}s ({st.get("share", 0):.0%}) → '
-                       f'<b>emotional strength {st.get("score", 0):.0f}/100</b>'
+                       f'<b>emotional strength {st.get("score", 0):.0f}/100</b>{laugh_txt}'
                        f'{" · moments " + html.escape(", ".join(_fmt_t(m["start"]) + "-" + _fmt_t(m["end"]) + " " + m["emotion"] for m in st.get("moments", [])[:5])) if st.get("moments") else ""}</p>')
     else:
         strong_line = ""
@@ -434,6 +436,40 @@ def _music_html(r: dict) -> str:
         bits.append("mood " + " → ".join(mood.get("sequence", [])[:6]) + " (" +
                     ", ".join(f"{k} {v:.0%}" for k, v in mood.get("shares", {}).items()) + ")")
     return f'<p><b>Music</b>: {html.escape(" · ".join(bits))}</p>'
+
+
+def _virality_html(r: dict) -> str:
+    """Why this viral potential: each factor's score, points, and pull vs a typical reel (diverging bar)."""
+    import html
+    s = r.get("scores") or {}
+    b = s.get("virality_breakdown") or []
+    if not b:
+        return ""
+    if s.get("virality_summary") is None:  # report scored before the summary existed
+        s["virality_summary"] = HL.virality_summary(s)
+    span = max(10.0, max(abs(x["vs_typical"]) for x in b))
+    top = max(b, key=lambda x: abs(x["vs_typical"]))
+    rows = []
+    for x in b:
+        d = x["vs_typical"]
+        w = 50 * abs(d) / span  # % of the bar track; the centre line is a typical reel
+        bar = (f'<span class=vbar><i class="{"up" if d >= 0 else "down"}" '
+               f'style="{"left:50%" if d >= 0 else f"left:{50 - w:.1f}%"};width:{w:.1f}%"></i></span>')
+        pts = "" if x.get("points") is None else f'{x["points"]:.1f}'
+        rows.append(f'<tr{" class=top" if x is top else ""}><td>{html.escape(x["label"])}</td>'
+                    f'<td class=num>{x["value"]:.0f}</td><td class=num>×{x["weight"]}</td><td class=num>{pts}</td>'
+                    f'<td>{bar}</td><td class="num {"pos" if d >= 0 else "neg"}">{d:+.1f}</td>'
+                    f'<td class=muted>{html.escape(x["explain"])}</td></tr>')
+    base = s.get("virality_base")
+    total = (f'{base:.1f} from attention + {s["virality"] - base:.1f} emotional lift = <b>{s["virality"]:.0f}</b>'
+             if base is not None else f'<b>{s["virality"]:.0f}</b>')
+    return (f'<section class=why><h2>Why viral potential {s["virality"]:.0f} '
+            f'<span class=muted>({html.escape(s.get("virality_tag", s.get("virality_band", "")))})</span></h2>'
+            f'<p>{html.escape(s.get("virality_summary") or "")}</p>'
+            f'<div class=wrap><table><tr><th>Factor</th><th>Score /100</th><th>Weight</th><th>Points</th>'
+            f'<th>vs a typical reel (factor at 50)</th><th></th><th>What it measures here</th></tr>{"".join(rows)}</table></div>'
+            f'<p class=muted>Total: {total}. Uncalibrated heuristic: weights are set by hand until fitted on real view '
+            f'counts; it judges the video only, never the account.</p></section>')
 
 
 def _suggestions_html(r: dict, job_id: str) -> str:
@@ -493,13 +529,27 @@ def _transcript_html(r: dict) -> str:
     return head + f'<ul class=transcript>{rows}</ul>'
 
 
+def analysed_at(report_json: Path) -> float:
+    """When the reel was analysed: the model output's time, not report.json's (re-scoring rewrites that)."""
+    d = report_json.parent
+    for f in (d / "raw" / "preds.npy", d / "preds.npy", report_json):  # preds are never rewritten
+        if f.exists():
+            return f.stat().st_mtime
+    return 0.0
+
+
+REPORT_SORTS = {"viral": "viral first", "latest": "latest first", "oldest": "oldest first"}
+
+
 @app.get("/reports", response_class=HTMLResponse)
 def list_reports(sort: str = "viral"):
-    """All saved reports, highest viral potential first (or ?sort=recent); refreshes itself so
+    """All saved reports: viral first (default), latest first or oldest first; refreshes itself so
     batch results appear as they land."""
     import html
+    import time as _time
+    sort = "latest" if sort == "recent" else sort if sort in REPORT_SORTS else "viral"
     rows = []
-    for p in sorted(OUT.glob("*/report.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for p in OUT.glob("*/report.json"):
         try:
             r = json.loads(p.read_text())
             s = r["scores"]
@@ -512,30 +562,34 @@ def list_reports(sort: str = "viral"):
         full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
         audio = (r.get("audio") or {}).get("type") or "-"
         song = (r.get("audio") or {}).get("song")
-        rows.append((s["virality"], p.stat().st_mtime, f'<tr><td><a href="/report/{job}/view">{html.escape(name)}</a></td>'
+        at = analysed_at(p)
+        rows.append((s["virality"], at, f'<tr><td><a href="/report/{job}/view">{html.escape(name)}</a></td>'
                     f'<td>{"full TRIBE" if full else "preview"}</td>'
                     f'<td><b>{s["virality"]:.0f}</b> {html.escape(s.get("virality_tag", s.get("virality_band", "")))}</td>'
                     f'<td>{s["hook_pct"]:.0f}</td><td>{s["hold_rate_pct"]:.0f}%</td><td>{s["finish_pct"]:.0f}%</td>'
                     f'<td>{html.escape(audio)}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
                     f'<td class=muted>{r.get("duration_s", "?")}s</td>'
-                    f'<td class=muted>{__import__("time").strftime("%H:%M", __import__("time").localtime(p.stat().st_mtime))}</td></tr>'))
-    rows.sort(key=(lambda x: -x[1]) if sort == "recent" else (lambda x: (-x[0], -x[1])))
-    rows = [r[2] for r in rows]
-    by_viral = sort != "recent"
-    sort_links = (f'Sort: {"<b>viral potential</b>" if by_viral else "<a href=/reports>viral potential</a>"} · '
-                  f'{"<b>newest</b>" if not by_viral else "<a href=/reports?sort=recent>newest</a>"}')
+                    f'<td class=muted>{_time.strftime("%b %d %H:%M", _time.localtime(at))}</td></tr>'))
+    key = {"viral": lambda x: (-x[0], -x[1]), "latest": lambda x: -x[1], "oldest": lambda x: x[1]}[sort]
+    rows = [r[2] for r in sorted(rows, key=key)]
+    sort_links = ('<label>Sort <select id=sort onchange="location.search=\'?sort=\'+this.value">'
+                  + "".join(f'<option value={k}{" selected" if k == sort else ""}>{label}</option>'
+                            for k, label in REPORT_SORTS.items()) + "</select></label>")
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<meta http-equiv=refresh content=5><title>Hookline reports</title>
+<title>Hookline reports</title>
+<script>/* live list: reload every 5s, but never while the sort menu is open */
+setInterval(()=>{{if(document.activeElement?.id!=="sort")location.reload()}},5000)</script>
 <style>:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--accent:#2563eb}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--accent:#60a5fa}}}}
 body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
 a{{color:var(--accent)}} .muted{{color:var(--muted)}} table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
 th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
-.wrap{{overflow-x:auto}}</style>
+.wrap{{overflow-x:auto}}
+select{{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;margin-left:4px}}</style>
 <h1>Hookline reports <span class=muted style=font-weight:400>({len(rows)}, refreshes every 5s)</span></h1>
 <p class=muted>{sort_links} · Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a></p>
 <div class=wrap><table><tr><th>Reel</th><th>Run</th><th>Viral potential</th><th>Hook</th><th>Hold</th><th>Finish</th>
-<th>Audio</th><th>Length</th><th>Saved</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
+<th>Audio</th><th>Length</th><th>Analysed</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
 
 
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
@@ -632,6 +686,14 @@ ul.transcript{{list-style:none;padding:0;columns:2;column-gap:24px}} ul.transcri
 a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 @media (max-width:800px){{.media{{grid-template-columns:1fr}} ul.transcript{{columns:1}}}}
 @media (max-width:640px){{.tiles{{grid-template-columns:repeat(2,1fr)}}}}
+.why table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
+.why th,.why td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}}
+.why th{{color:var(--muted);font-weight:500;font-size:.85rem}} .why .num{{text-align:right;white-space:nowrap}}
+.why tr.top td:first-child{{font-weight:700}} .why .pos{{color:var(--hook)}} .why .neg{{color:var(--drop)}}
+.why .wrap{{overflow-x:auto}}
+.vbar{{position:relative;display:block;width:160px;height:10px;background:var(--line);border-radius:5px}}
+.vbar::after{{content:"";position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--muted)}}
+.vbar i{{position:absolute;top:0;bottom:0;border-radius:5px}} .vbar i.up{{background:var(--hook)}} .vbar i.down{{background:var(--drop)}}
 </style>
 <h1>Hookline report <span>{job_id} ({mode})</span></h1>
 <p class=muted>{html.escape(Path(r.get('video', '')).name)} · {r.get('duration_s', '?')}s{mods_txt}</p>
@@ -644,6 +706,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {tile('Viral potential', f"{s['virality']:.0f}", s.get('virality_tag', s['virality_band']))}
 </div>
 <div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}{_emotion_html(r)}</div></div>
+{_virality_html(r)}
 {_suggestions_html(r, job_id)}
 {_transcript_html(r)}
 {'<h2>What to change</h2><ul>' + recs + '</ul>' if HL.SHOW_SUGGESTIONS else ''}

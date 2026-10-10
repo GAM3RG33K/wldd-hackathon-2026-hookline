@@ -36,7 +36,9 @@ NAMES = list(EMOTIONS)
 
 # Peaks of these count as strong emotions (high arousal or deep valence).
 STRONG = ["amusement", "awe", "anger", "sadness", "moved", "fear", "disgust", "empathic_pain"]
-STRONG_LABEL = {"amusement": "laughter", "anger": "outrage", "sadness": "sorrow"}
+# Display names for strong peaks. These are PREDICTED evoked emotions, not detected sounds: an amusement
+# peak is "the viewer is likely amused here", not "someone laughs" (audible laughter is reported separately).
+STRONG_LABEL = {"anger": "outrage", "sadness": "sorrow"}
 
 VISUAL_PROMPTS = {  # prompt -> emotion. Situations (appraisal) + moods, across content types.
     "a person doing something hilarious": "amusement", "a funny prank or blooper": "amusement",
@@ -94,7 +96,14 @@ GO_MAP = {
     "disappointment": {"sadness": 0.6}, "fear": {"fear": 1.0}, "nervousness": {"fear": 0.7},
     "anger": {"anger": 1.0}, "annoyance": {"anger": 0.6}, "disapproval": {"anger": 0.5},
     "disgust": {"disgust": 1.0}, "embarrassment": {"awkwardness": 1.0}, "approval": {"admiration": 0.3},
+    "neutral": {"calm": 1.0},  # neutral speech counts as calm (dropping it inflated the other labels)
 }
+
+# Facial expression (FER2013 labels, Space face channel) -> taxonomy. This is the emotion PORTRAYED on
+# screen; "happy" is spread over the positive emotions a smiling face usually carries in reels.
+FACE_MAP = {"angry": {"anger": 1.0}, "sad": {"sadness": 1.0}, "fear": {"fear": 1.0}, "disgust": {"disgust": 1.0},
+            "surprise": {"surprise": 1.0}, "happy": {"amusement": 0.5, "excitement": 0.3, "hope": 0.2},
+            "neutral": {"calm": 1.0}}
 
 # AudioSet sound events (from the speech-gate AST pass) -> taxonomy
 SOUND_MAP = {"amusement": "amusement", "awe": "awe", "surprise": "surprise", "tension": "fear", "sadness": "sadness"}

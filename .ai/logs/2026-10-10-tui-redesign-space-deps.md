@@ -298,3 +298,60 @@
 - Start = `POST /api/spaces/{repo}/restart` (resumes a paused Space) or a wake ping when SLEEPING; stop = `POST .../pause`. Stop and restart kill running jobs, so they need a second press within 5s.
 - `/jobs` polling for "live on Space" now skipped unless the Space is running. No new dependencies (urllib only).
 - Verified headless (Textual run_test): paused stage rendered, stop disabled when paused, restart confirm arms and expires. Start/stop not exercised (would bill).
+
+## 2026-10-11 — TUI: Enter/p opens saved reports only
+- Enter / `p` no longer runs the local synthetic-brain preview. They open the reel's saved report, found by file name (`report_for`: this session's run, else `report_index` built in `refresh_saved`; full TRIBE preferred over previews, newest first).
+- No report: the reel card + status say "Press f to run the analysis and build the report". Own files (`o`) do the same.
+- Removed the TUI `run_preview` worker; backend `/analyze?mode=preview` is kept for the web upload page.
+- Verified headless: FC001 (saved) opens its report; FC002 (none) shows the press-f card on `p` and Enter.
+- Trending audio from the YouTube Shorts chart (`tribe/update_trending.py`) is parked as low priority; the catalog rewrite is uncommitted.
+
+## 2026-10-11 — Emotion: product review read as "laughter" (fix A + B)
+- Cause (mohit-burad review, s-41cc98d9): CLAP labelled the music bed "comedic quirky funny music" (90%); music alone could make strong peaks at full weight -> 34s laughter, strength 100, viral 68. GoEmotions "neutral" (53% on Hinglish text) was dropped, leaving amusement 0.57 on a 30s segment; voice-arousal wobble made it peak.
+- A: GO_MAP `neutral -> calm`; `channel_trust()`: music weight 0.5 in reels the speech gate calls speech / speech_over_music (bed), in both fusion and strong-peak evidence.
+- B: transcript emotion weight 0.5 unless the transcript is plain English (GoEmotions is English-only).
+- Rejected: requiring 2-channel agreement for strong peaks (removed FL041's 36s sorrow; FL041 is music-led).
+- Re-scored 30 reports. Review 67.8 -> 35.5 (no strong peaks). FL041 sorrow 36s kept (68.2). Comedy reels with speech also lost laughter peaks (OL003 85.8 -> 78.1, FL011 62.1 -> 55.2, FC037 77.8 -> 55.5, FC029 61.0 -> 49.5): their laughter also came from the music bed, i.e. we cannot yet detect jokes in speech.
+- Still open: the review's everyday mood track still reads amusement 83% (music bed at half weight + CLIP "hub" prompts "hilarious / prank"; no product-demo prompt). Needs informational prompts on the Space (re-run) and/or the >=15-reel prompt calibration.
+
+## 2026-10-11 — TUI keys: a analyze, v view, o file picker, m run options
+- `a` = analyze (full TRIBE on the Space, was `f`); `v` = view report in browser (was `w`).
+- `o` opens the system file picker (macOS `osascript choose file`, Linux `zenity`; typed-path modal as fallback) and starts the analysis as soon as a file is picked. Re-picking the same file reuses its tree node.
+- Modality toggles moved off `v`/`a`/`t`/`l` into a `RunOptions` modal on `m` (same keys inside it); header shows "m run: [x] video [x] audio [a] transcript auto".
+- `a` refuses with "press S to start it" when the Space is paused/stopped/errored instead of failing the upload.
+- Headless tests: picker stub -> node added -> run started; m modal toggles; v opens /report/{id}/view; paused guard. DEMO.md + ARCHITECTURE.md key references updated.
+
+## 2026-10-11 — TUI: re-analyze from saved reports, local analysis queue
+- `a` on a "saved reports" entry resolves the report's video (`video_of_report`: sample reel by id, else the local file) and re-runs it; "Re-analyzing X" when a report exists (supersede replaces it on import).
+- Queue: `a` / `o` while a run is active (or queued) -> `enqueue` with the run options at that moment; `run_space` worker always clears `space_run` in `finally` and calls `start_next`. Duplicate requests are refused; `x` on a queued item removes it; tree shows "N queued here". If the Space is paused when the next item is due, the queue waits with a "press S" message.
+- `begin_run` marks the Space busy before the upload starts, so a second request during a long upload queues instead of uploading in parallel. Stop/restart refuse politely while uploading. Fixed: the 3h give-up path left `space_run` set.
+- Headless test with a fake job: 3 requests -> 1 running + 2 queued, duplicate refused, x removes, queue drains in order with each item's own options.
+
+## 2026-10-11 — Emotion: deadpan monologue read as "laughter 31s" (rajpsych_2, s-a78b5828)
+- Causes: (1) speech gate heard 0% music (87% speech) but CLAP still ranked mood prompts on the voice ("comedic quirky funny music", "mournful") -> invented amusement + sorrow peaks. (2) The running backend imported this reel with the OLD fusion code: `rescore` reloaded only `hookline_report`, never `emotion_fusion` / `taxonomy` / `suggest` / `audio_music` (report had no `channel_trust`). (3) Strong label "laughter" read as audible laughs; it meant predicted amusement.
+- Fixes: `has_music()` drops the music channel when the gate's music / vocals / bed / humming ratios are all < 0.1. `rescore` reloads TX, AMU, EF, SG, HL (dependencies first); backend restarted. Strong label now "amusement" (predicted, evoked); new `strong.audible_laughter_s` from AST laughter / giggle / chuckle, shown in web + TUI ("no audible laughter in the audio").
+- Re-scored 35 reports. rajpsych_2: no strong peaks, amusement 100% (evoked mood, plausible for comedy), viral 47.8. FL041 sorrow 36s kept. Audible laughter 0s on every reel so far.
+- Limit: humour itself is still inferred from CLIP "hilarious / prank" prompts + GoEmotions on Hinglish, not from understanding the joke. Next: a semantic layer (VLM / Hinglish-capable LLM over transcript + frames).
+
+## 2026-10-11 — Report ordering: web sortable, TUI latest first
+- Web `/reports?sort=viral|latest|oldest` (default viral; `recent` kept as an alias for latest), links for all three, "Analysed" column with date + time.
+- TUI "saved reports" always latest first.
+- Order uses `analysed_at()` = mtime of `raw/preds.npy` (preview: `preds.npy`): re-scoring rewrites report.json AND raw/meta.json, so their mtimes made every re-scored report look new.
+- Sort is now a dropdown (`<select id=sort>`, navigates on change). The 5s meta refresh became a JS reload that skips while the dropdown has focus, so the menu does not close under you. Checked in Chrome: picking "oldest first" reloads with ?sort=oldest, selection kept, FC030 first.
+
+## 2026-10-11 — "Why viral potential N" section
+- `hookline_report.virality_breakdown()`: per factor (hook, few drop-offs, strong-attention moments, ending) score /100, weight, points, and pull vs a typical reel (factor at 50 -> weight x (score - 50)). `finalize` appends "Emotional peaks" with the actual lift points. Fitted model path (when `virality_model.json` exists) reports weight x standardised feature instead.
+- `scores.virality_summary`: "Biggest boost: X, +n points vs a typical reel (why). Biggest drag: Y, -n points (why)."
+- Web report: section after the chart (summary, table, diverging bar, explanation, total = base + emotional lift). TUI: "viral potential:" line with factors sorted by pull + the summary. Markdown: table.
+- Re-scored 35 reports, backend restarted. Checked FL041 in Chrome: emotional peaks +31.9 (boost), hook -18.6 (drag), total 36.3 + 31.9 = 68.
+
+## 2026-10-11 — Face channel (emotion portrayed on screen)
+- Why: rajpsych_2 (performed "Dhoka Diya" meltdown: pleading, rage, despair) showed no emotions. Voice arousal/valence alone confuses emphasis with anger (product review CTA ~ same signature as rage); CLIP "crying / argument" prompts never beat the "funny prank" hub prompt; per-reel prompt z-scores were too noisy (fear / disgust false peaks).
+- Space (`hf_space/emotion.py`): `_face` = OpenCV YuNet face detection + `trpakov/vit-face-expression` (Apache-2.0, safetensors, FER2013 7 labels) on the 1 fps frames CLIP already uses; raw `emotion.face = {probs, faces, area}` per second. Dockerfile: opencv-python-headless 4.10 (if cv2 lacks FaceDetectorYN) + YuNet ONNX in /app/models. Warm-up loads it at boot.
+- Local (`taxonomy.FACE_MAP`, `emotion_fusion.face_dist`): angry->anger, sad->sadness, fear, disgust, surprise, happy->amusement/excitement/hope, neutral->calm; 3s mean over frames with a face (single frames jitter). Face is a full-weight channel in fusion and strong peaks.
+- Validated before deploy on CPU (88 frames in 5.7s): rajpsych -> sorrow 0:28, 1:01, outrage 1:07; product review -> nothing; FL041 unchanged.
+- Deployed (Space commit 88e090c; this upload also shipped the parked trending catalog, now 66 tracks). Smoke test on the Space: rajpsych 185s, 79 face frames, same peaks, old report superseded. Re-running all 45 reels with reports (scratchpad rerun_all.py, ~95 min A100).
+
+## 2026-10-11 — Docs refresh + checkpoint
+- Rewrote stale docs to the current system: AGENTS.md (Space = raw data, local = reports; verification loop with rescore / Space deploy / headless TUI), DEMO.md (current keys and flow), `.ai/rules/01-03` (pipeline, emotion contract, virality + breakdown, data model, Space API, report surfaces), `.ai/research/` (new `emotion.md`; scoring, hf-space, README updated), `hf_space/README.md`, `hf_space/CLIENT_SNIPPET.md`, ARCHITECTURE.md (face channel, channel trust, why-viral, reports sort, re-analyze, trending script).
+- Promoted the batch re-run script to `tribe/rerun_all.py` (repo-relative paths).

@@ -5,6 +5,7 @@ Channels (each optional, all per second):
   visual  CLIP zero-shot on 1 fps frames against emotion prompts
   voice   wav2vec2 arousal / valence regression on seconds with speech
   text    GoEmotions classifier on transcript segments (English-trained; Hinglish is partial)
+  face    YuNet face detection + ViT expression classifier on 1 fps frames (emotion portrayed on screen)
 Sounds (laughter, cheering, gasps...) come from the AST pass in the speech gate.
 """
 import subprocess
@@ -21,6 +22,8 @@ CLIP_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
 VOICE_REPO = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"  # CC-BY-NC-SA: prototype only
 TEXT_REPO = "SamLowe/roberta-base-go_emotions"
 MUSIC_REPO = "laion/clap-htsat-fused"  # Apache-2.0, safetensors (the music-only CLAPs are .bin)
+FACE_REPO = "trpakov/vit-face-expression"  # Apache-2.0, safetensors; FER2013 labels: angry disgust fear happy neutral sad surprise
+YUNET = Path(__file__).with_name("models") / "face_detection_yunet_2023mar.onnx"  # OpenCV face detector (Apache-2.0)
 # Music mood prompts (two per mood); per-second softmax over moods from 4s windows.
 
 # Two CLIP prompts per emotion plus a neutral anchor; scores are averaged per emotion.
@@ -130,6 +133,39 @@ def _music(audio16k, n, device):
     return {"prompt_sim": {k: [round(float(x), 4) for x in p[:, j]] for j, k in enumerate(prompts)}}
 
 
+def _face(frames, device):
+    """Facial expression of the biggest face per frame (1 fps): the emotion PORTRAYED on screen.
+    Raw label probabilities only; mapping to the taxonomy and smoothing happen locally."""
+    import cv2
+    from transformers import pipeline
+    if "face" not in _M:
+        _M["face"] = (cv2.FaceDetectorYN.create(str(YUNET), "", (320, 320), 0.7, 0.3, 5000),
+                      pipeline("image-classification", model=FACE_REPO, top_k=None,
+                               device=0 if device == "cuda" else -1, model_kwargs={"use_safetensors": True}))
+    det, clf = _M["face"]
+    probs, count, area, crops, idx = [None] * len(frames), [0] * len(frames), [0.0] * len(frames), [], []
+    for t, im in enumerate(frames):
+        img = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+        h, w = img.shape[:2]
+        det.setInputSize((w, h))
+        _, faces = det.detect(img)
+        if faces is None or not len(faces):
+            continue
+        x, y, fw, fh = max(faces, key=lambda r: r[2] * r[3])[:4]
+        count[t], area[t] = int(len(faces)), round(float(fw * fh / (w * h)), 4)
+        m = 0.2  # margin around the box: the classifier was trained on loosely cropped faces
+        x0, y0 = int(max(0, x - m * fw)), int(max(0, y - m * fh))
+        x1, y1 = int(min(w, x + fw * (1 + m))), int(min(h, y + fh * (1 + m)))
+        if x1 - x0 < 24 or y1 - y0 < 24:
+            continue
+        crops.append(im.crop((x0, y0, x1, y1)))
+        idx.append(t)
+    for i in range(0, len(crops), 32):
+        for t, res in zip(idx[i:i + 32], clf(crops[i:i + 32])):
+            probs[t] = {d["label"]: round(float(d["score"]), 3) for d in res}
+    return {"probs": probs, "faces": count, "area": area}
+
+
 def _text(segments, n, device):
     from transformers import pipeline
     if "text" not in _M:
@@ -154,6 +190,7 @@ def warm(device):
     from PIL import Image
     status = {}
     for name, fn in (("visual", lambda: _clip([Image.new("RGB", (64, 64))], device)),
+                     ("face", lambda: _face([Image.new("RGB", (64, 64))], device)),
                      ("voice", lambda: _voice(np.zeros(32000, dtype=np.float32), 16000, [1.0], device)),
                      ("text", lambda: _text([{"start": 0, "end": 1, "text": "warm up"}], 1, device)),
                      ("music", lambda: _music(np.zeros(32000, dtype=np.float32), 2, device))):
@@ -172,7 +209,7 @@ def emotion_cues(video, audio, sr, speech_prob, segments, device, log=print):
         t0 = time.time()
         frames = _frames(video, tmp)
         log(f"emotion: {len(frames)} frames in {time.time() - t0:.1f}s")
-        for name, fn in (("visual", lambda: _clip(frames, device)),):
+        for name, fn in (("visual", lambda: _clip(frames, device)), ("face", lambda: _face(frames, device))):
             t0 = time.time()
             try:
                 out[name] = fn()

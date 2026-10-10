@@ -59,6 +59,13 @@ RUN mkdir -p /tmp/home /tmp/hf /tmp/cache /tmp/torch && chmod -R a+rwX /tmp \
 
 # Chromaprint fpcalc (a few MB) for song identification against the trending catalog.
 RUN apt-get update -qq && apt-get install -y -qq libchromaprint-tools > /dev/null && rm -rf /var/lib/apt/lists/*
+# Face channel: OpenCV with FaceDetectorYN (keep an existing cv2 if it already has it) + the YuNet model.
+RUN python -c "import cv2; assert hasattr(cv2, 'FaceDetectorYN')" 2>/dev/null \
+ || pip install --no-cache-dir -q opencv-python-headless==4.10.0.84
+RUN mkdir -p /app/models && wget -q -O /app/models/face_detection_yunet_2023mar.onnx \
+    https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx \
+ && python -c "import os; assert os.path.getsize('/app/models/face_detection_yunet_2023mar.onnx') > 100000" \
+ && chmod -R a+rX /app/models
 
 COPY tribe_analyze.py hookline_report.py emotion_fusion.py suggest.py audio_music.py taxonomy.py app.py audio_match.py emotion.py trending_audio.json ./
 
