@@ -31,6 +31,9 @@ CFG = dict(
     hold_floor=0.93, hold_span=0.065,  # per-second hold prob range (hypothesis)
     silence_db=-45.0,
 )
+# MVP0 shows the judgement only. Suggestions are still computed into report.json
+# ("recommendations") but not displayed until they stop being generic (MVP1).
+SHOW_SUGGESTIONS = False
 
 # Destrieux atlas labels per functional group. Attention index = sensory + attention +
 # language activity minus default-mode activity (engaged vs mind-wandering).
@@ -364,8 +367,12 @@ def write_md(r, path):
              f"- **Viral potential:** {s['virality']} ({s.get('virality_tag', s['virality_band'])}; "
              f"{s.get('virality_method', 'uncalibrated')})", "",
              f"Peak hook at {fmt(m['peak_hook_at_s'])}. Strongest window {fmt(m['strongest_window_s'][0])}-{fmt(m['strongest_window_s'][1])}, "
-             f"weakest {fmt(m['weakest_window_s'][0])}-{fmt(m['weakest_window_s'][1])}.", "", "## What to change", ""]
-    for x in r["recommendations"]:
+             f"weakest {fmt(m['weakest_window_s'][0])}-{fmt(m['weakest_window_s'][1])}.", ""]
+    drops = ", ".join(f"{fmt(a)}-{fmt(b)}" for a, b in m.get("drop_zones_s", [])) or "none"
+    lines += [f"Drop zones: {drops}.", ""]
+    if SHOW_SUGGESTIONS:
+        lines += ["## What to change", ""]
+    for x in (r["recommendations"] if SHOW_SUGGESTIONS else []):
         lines.append(f"- **{x['at']}**, {x['issue']}. {x['fix']}")
     lines += ["", f"_{r['method']}_"]
     path.write_text("\n".join(lines))
@@ -405,8 +412,9 @@ def write_png(r, d, path):
     ax2.set_title("Predicted brain-network response (relative to this video)")
     fig.colorbar(im, ax=ax2, fraction=0.015)
     ax3 = fig.add_subplot(gs[3, :]); ax3.axis("off")
-    txt = "\n".join(f"{x['at']}  {x['issue']}: {x['fix']}" for x in r["recommendations"][:6]) or "No issues found."
-    ax3.text(0, 1, "What to change\n" + txt, va="top", fontsize=9, wrap=True)
+    if SHOW_SUGGESTIONS:
+        txt = "\n".join(f"{x['at']}  {x['issue']}: {x['fix']}" for x in r["recommendations"][:6]) or "No issues found."
+        ax3.text(0, 1, "What to change\n" + txt, va="top", fontsize=9, wrap=True)
     fig.savefig(path, dpi=130, bbox_inches="tight")
 
 

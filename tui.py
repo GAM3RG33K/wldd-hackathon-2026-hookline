@@ -45,6 +45,7 @@ BAND_STYLE = {"Bad": "red", "Weak": "yellow", "Average": "cyan", "Strong": "gree
               "Low reach": "red", "Above average": "green", "Popular": "green", "Viral potential": "bold green"}
 BLOCKS = " ▁▂▃▄▅▆▇█"
 POLL_S = 1.0  # Space progress poll interval; /jobs is an in-memory lookup, cheap to hit
+SHOW_SUGGESTIONS = False  # MVP0: judgement only; suggestions return in MVP1
 
 
 # ---------------------------------------------------------------- data / http
@@ -271,7 +272,7 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
 [b]Try it in 3 steps[/b]
   1. Pick a reel on the left (↑/↓; Enter opens a folder)
   2. Press [b]Enter[/b] or [b]p[/b] for a preview report (seconds, runs locally)
-  3. Read [b]What to change[/b]: every fix has a timestamp
+  3. Read the scores, viral-potential tag and the attention chart
 
 [b]Keys[/b]
   p        preview analysis (local, real audio/visual/speech signals)
@@ -508,7 +509,7 @@ class Hookline(App):
         tbl.add_column("AT", style="bold green", no_wrap=True, width=11)
         tbl.add_column("ISSUE", ratio=2)
         tbl.add_column("FIX", ratio=3)
-        for x in r["recommendations"]:
+        for x in (r["recommendations"] if SHOW_SUGGESTIONS else []):
             tbl.add_row(x["at"], x["issue"], x["fix"])
         tr = r.get("transcript") if isinstance(r.get("transcript"), dict) else {}
         if tr.get("segments") or tr.get("status"):
@@ -518,14 +519,14 @@ class Hookline(App):
             for seg in (tr.get("segments") or [])[:40]:
                 lines.append(f"{fmt_t(seg['start']):>6} ", "green")
                 lines.append(seg["text"] + "\n")
-            tbl_group = Group(tbl, lines)
-            self.query_one("#recs", Static).update(tbl_group)
+            self.query_one("#recs", Static).update(Group(tbl, lines) if SHOW_SUGGESTIONS else lines)
         else:
-            self.query_one("#recs", Static).update(tbl)
+            self.query_one("#recs", Static).update(tbl if SHOW_SUGGESTIONS else Text(""))
         self.query_one("#method", Static).update(Text(
             f"\n{r.get('method', '')} · neural: {r.get('neural_source', '?')}", "dim italic"))
         for w in ("#tiles", "#strip-h", "#strip", "#moments", "#recs-h", "#recs", "#method"):
             self.query_one(w).display = True
+        self.query_one("#recs-h").display = SHOW_SUGGESTIONS
 
     def show_reel_card(self, d):
         self.current_job = None

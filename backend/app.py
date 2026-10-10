@@ -158,6 +158,9 @@ async def analyze(video: UploadFile = File(...), mode: str = "preview"):
 @app.get("/report/{job_id}.md")
 def get_md(job_id: str):
     p = OUT / job_id / "report.md"
+    rj = OUT / job_id / "report.json"
+    if rj.exists():  # regenerate so it follows the current display rules (MVP0: no suggestions)
+        HL.write_md(json.loads(rj.read_text()), p)
     if not p.exists():
         return JSONResponse({"error": "unknown job"}, status_code=404)
     return FileResponse(p, media_type="text/markdown")
@@ -377,7 +380,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 </div>
 <div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}</div></div>
 {_transcript_html(r)}
-<h2>What to change</h2><ul>{recs}</ul>
+{'<h2>What to change</h2><ul>' + recs + '</ul>' if HL.SHOW_SUGGESTIONS else ''}
 {png_html}
 <p class=muted>Viral potential: {html.escape(s.get('virality_method', 'legacy formula'))}.
 Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored within the video).</p>
