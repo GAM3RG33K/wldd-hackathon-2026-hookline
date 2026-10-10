@@ -386,3 +386,7 @@
 - Per-second label: strongest single trusted channel >= 0.30 else "no clear emotion"; summary `no_clear_share`, `confidence`, `channels_agreeing`; shown in web + TUI emotion lines.
 - Faces: area >= 1%, top expression >= 0.6, minus 70% of the reel median per expression.
 - Iterations on the 3 check reels (FL041, rajpsych_2, product review): absolute-z (FL041 lost everything), fused-prob dominance (FL041 99% none), text z explosion (rajpsych disgust 17%) -> final in .ai/research/emotion.md. Only these 3 reels re-scored; the rest still carry the previous emotion scoring until `python tribe/rescore.py`.
+
+## 2026-10-11 — Pitch deck web app (/pitch)
+- `pitch/deck.md` (12 slides mapped to the 5 judging criteria) rendered by `backend/pitch.py` at `/pitch`: keyboard / swipe navigation, speaker notes (`n`), full screen (`f`), progress bar; live blocks `{{scores|report|why|emotion|suggestions:KEY}}`, `{{architecture}}`, `{{validation}}` (sample reels with full runs: n, median views, mean viral potential, Spearman vs views: all +0.20, face +0.38, faceless -0.11, outliers +0.02 at build time). Edit the file and refresh; no restart. Link from /reports.
+- GPU wrap-up: deployed Space commit 0492f58, re-ran the 3 check reels (review +caption: viral 45, no strong peaks; FL041 +caption: 66, sorrow 19s; rajpsych_2: 54, outrage 2s + sorrow 2s), no other jobs, Space PAUSED 03:38. No GPU work until next morning.

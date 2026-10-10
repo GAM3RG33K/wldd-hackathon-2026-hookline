@@ -11,7 +11,7 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 ```
 
 - GPU work runs on the Hugging Face Space `wlddhq/hookline-tribe` (A100). Start it from the TUI with `S` → `s`; it sleeps after 30 min idle. Needs an HF token (`hf auth login`).
-- Web reports: `http://localhost:8000/reports`.
+- Web reports: `http://localhost:8000/reports` · pitch deck: `http://localhost:8000/pitch` (←/→, `n` notes, `f` full screen).
 
 ## Features
 
@@ -60,6 +60,7 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 ## Docs
 
 - `ARCHITECTURE.md` — what runs where, flow diagram, what is analysed and how scores are built.
+- `pitch/deck.md` — the pitch deck source (slides split by `---`, live report blocks; edit and refresh `/pitch`).
 - `DEMO.md` — demo cues.
 - `AGENTS.md` — core beliefs, rule index, verification loop.
 - `.ai/rules/` — scoring contract, stack and Space API, report surfaces. `.ai/research/` — findings (emotion, scoring, Space). `.ai/logs/` — session logs.

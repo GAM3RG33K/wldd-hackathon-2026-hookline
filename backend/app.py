@@ -574,6 +574,14 @@ def analysed_at(report_json: Path) -> float:
 REPORT_SORTS = {"viral": "viral first", "latest": "latest first", "oldest": "oldest first"}
 
 
+@app.get("/pitch", response_class=HTMLResponse)
+def pitch():
+    """Pitch deck rendered from pitch/deck.md with live report blocks (edit the file, refresh)."""
+    import importlib
+    P = importlib.reload(importlib.import_module("backend.pitch"))
+    return HTMLResponse(P.render(sys.modules[__name__]))
+
+
 @app.get("/reports", response_class=HTMLResponse)
 def list_reports(sort: str = "viral"):
     """All saved reports: viral first (default), latest first or oldest first; refreshes itself so
@@ -620,7 +628,7 @@ th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}} th
 .wrap{{overflow-x:auto}}
 select{{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;margin-left:4px}}</style>
 <h1>Hookline reports <span class=muted style=font-weight:400>({len(rows)}, refreshes every 5s)</span></h1>
-<p class=muted>{sort_links} · Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a></p>
+<p class=muted>{sort_links} · Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a> · <a href="/pitch">Pitch deck</a></p>
 <div class=wrap><table><tr><th>Reel</th><th>Run</th><th>Viral potential</th><th>Hook</th><th>Hold</th><th>Finish</th>
 <th>Audio</th><th>Length</th><th>Analysed</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
 
