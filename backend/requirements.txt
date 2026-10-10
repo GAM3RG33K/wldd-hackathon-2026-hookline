@@ -7,3 +7,4 @@ matplotlib
 nilearn
 requests
 textual>=0.80
+scipy

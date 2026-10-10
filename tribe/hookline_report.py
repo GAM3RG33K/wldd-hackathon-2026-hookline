@@ -87,6 +87,38 @@ _VM = Path(__file__).with_name("virality_model.json")
 VIRALITY_MODEL = json.loads(_VM.read_text()) if _VM.exists() else None
 
 
+PEAK_PROMINENCE = 15.0                      # attention points above the surrounding dips
+PEAK_WINDOW_FRAC, PEAK_WINDOW_MAX, PEAK_WINDOW_MIN = 0.10, 10.0, 2.0  # window = 10% of length, 2-10s
+
+
+def peak_window(T):
+    """Window for peak detection and rate: 10% of the reel, capped at 10s (2s floor for very short reels)."""
+    return float(min(PEAK_WINDOW_MAX, max(PEAK_WINDOW_MIN, PEAK_WINDOW_FRAC * T)))
+
+
+def attention_peaks(a):
+    """Seconds where attention clearly peaks: topographic prominence >= PEAK_PROMINENCE (height
+    above the lowest ground between it and any higher peak, so broad plateaus still count), and
+    at least window/2 after the previous peak."""
+    from scipy.signal import find_peaks
+    a = np.asarray(a, dtype=float)
+    if len(a) < 3:
+        return []
+    gap = max(1, int(round(peak_window(len(a)) / 2)))
+    idx, _ = find_peaks(a, prominence=PEAK_PROMINENCE, distance=gap)
+    return [int(i) for i in idx]
+
+
+def peak_features(attention):
+    p = attention_peaks(attention)
+    T = max(len(attention), 1)
+    w = peak_window(T)
+    gaps = np.diff(p) if len(p) > 2 else np.array([])
+    return {"peaks": len(p), "peak_window_s": round(w, 1),
+            "peaks_per_window": round(len(p) / (T / w), 3),     # peaks per 10% of the reel (<=10s)
+            "peak_gap_cv": round(float(gaps.std() / gaps.mean()), 3) if len(gaps) and gaps.mean() else 1.0}
+
+
 def virality_tag(score):
     return next(name for cut, name in VIRALITY_TIERS if score < cut)
 
@@ -321,15 +353,7 @@ def analyse(out_dir, video=None):
         "duration_s": round(dur, 2),
         **{f"net_{g}": round(float(v.mean()), 5) for g, v in net_t.items()},
     }
-    pk = [i for i in range(1, T - 1) if A[i] >= A[i - 1] and A[i] >= A[i + 1]
-          and A[i] - max(A[max(0, i - 6):i].min(), A[i + 1:i + 7].min()) >= 15]
-    peaks_kept = []
-    for i in pk:  # at least 3s apart
-        if not peaks_kept or i - peaks_kept[-1] >= 3:
-            peaks_kept.append(i)
-    gaps = np.diff(peaks_kept) if len(peaks_kept) > 2 else np.array([])
-    features.update(peaks=len(peaks_kept), peaks_per_10s=round(10 * len(peaks_kept) / T, 3),
-                    peak_gap_cv=round(float(gaps.std() / gaps.mean()), 3) if len(gaps) and gaps.mean() else 1.0)
+    features.update(peak_features(A))
     if VIRALITY_MODEL:
         m = VIRALITY_MODEL
         z = m["bias"] + sum(w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k])

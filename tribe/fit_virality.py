@@ -19,36 +19,19 @@ from pathlib import Path
 
 import numpy as np
 
+sys_path = Path(__file__).resolve().parent
+import sys  # noqa: E402
+sys.path.insert(0, str(sys_path))
+import hookline_report as HL  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "backend" / "out"
 MODEL = Path(__file__).resolve().parent / "virality_model.json"
 CANDIDATES = ["hook", "engagement_raw", "hook_lift", "peak_share", "drop_share", "ending", "volatility",
               "cuts_per_s", "motion", "loudness_db", "duration_s", "net_visual", "net_auditory",
               "net_language", "net_attention", "net_default_mode",
-              "peaks", "peaks_per_10s", "peak_gap_cv"]
+              "peaks", "peaks_per_window", "peak_gap_cv"]
 # avg attention is NOT a candidate: it is ~50 for every video by construction (within-video score).
-
-
-def attention_peaks(a, prominence=15.0, min_gap_s=3):
-    """Seconds where attention clearly peaks: >= `prominence` points above the lower of the
-    dips within 6s either side, and >= `min_gap_s` after the previous peak."""
-    a = np.asarray(a, dtype=float)
-    out = []
-    for i in range(1, len(a) - 1):
-        if a[i] >= a[i - 1] and a[i] >= a[i + 1]:
-            dip = max(a[max(0, i - 6):i].min(), a[i + 1:i + 7].min())
-            if a[i] - dip >= prominence and (not out or i - out[-1] >= min_gap_s):
-                out.append(i)
-    return out
-
-
-def peak_features(attention):
-    p = attention_peaks(attention)
-    T = max(len(attention), 1)
-    gaps = np.diff(p) if len(p) > 2 else np.array([])
-    return {"peaks": float(len(p)), "peaks_per_10s": 10.0 * len(p) / T,
-            # spread of the gaps between peaks: 0 = perfectly regular re-hooks
-            "peak_gap_cv": float(gaps.std() / gaps.mean()) if len(gaps) and gaps.mean() else 1.0}
 
 
 def strata():
@@ -68,7 +51,7 @@ def load():
         vid = r.get("source_id") or Path(r.get("local_video", "")).stem
         if not f or vid not in st or "tribev2-full" not in str(r.get("neural_source", "")):
             continue
-        f = {**f, **peak_features(r.get("series", {}).get("attention") or [])}
+        f = {**f, **HL.peak_features(r.get("series", {}).get("attention") or [])}
         rows.append({"id": vid, "path": p, "y": 1 if st[vid] == "outliers" else 0, "f": f})
     return rows
 
