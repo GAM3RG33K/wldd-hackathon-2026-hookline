@@ -321,6 +321,15 @@ def analyse(out_dir, video=None):
         "duration_s": round(dur, 2),
         **{f"net_{g}": round(float(v.mean()), 5) for g, v in net_t.items()},
     }
+    pk = [i for i in range(1, T - 1) if A[i] >= A[i - 1] and A[i] >= A[i + 1]
+          and A[i] - max(A[max(0, i - 6):i].min(), A[i + 1:i + 7].min()) >= 15]
+    peaks_kept = []
+    for i in pk:  # at least 3s apart
+        if not peaks_kept or i - peaks_kept[-1] >= 3:
+            peaks_kept.append(i)
+    gaps = np.diff(peaks_kept) if len(peaks_kept) > 2 else np.array([])
+    features.update(peaks=len(peaks_kept), peaks_per_10s=round(10 * len(peaks_kept) / T, 3),
+                    peak_gap_cv=round(float(gaps.std() / gaps.mean()), 3) if len(gaps) and gaps.mean() else 1.0)
     if VIRALITY_MODEL:
         m = VIRALITY_MODEL
         z = m["bias"] + sum(w * (((features.get(k) or 0.0) - m["mean"][k]) / m["std"][k])
