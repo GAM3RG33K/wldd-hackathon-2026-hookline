@@ -291,3 +291,10 @@
   became the norm. Calibration is now off below 15 reels; it needs a balanced reference run.
 - One report per video: a newer run replaces older ones (full beats preview); keyed by file name;
   replaced folders go to backend/out/.replaced/. 22 duplicates cleaned up.
+
+## 2026-10-11 — TUI: GPU Space status + control modal
+- Header shows the live Space stage from the HF Hub runtime API (`● live`, `◐ starting/building`, `○ paused/sleeping`, `✕ error`), polled every 15s; works while the Space is paused (no wake, no billing).
+- `S` opens `SpaceScreen` modal: stage, hardware, sleep timer, health ping latency, active jobs; buttons/keys `p` ping, `s` start, `r` restart, `x` stop.
+- Start = `POST /api/spaces/{repo}/restart` (resumes a paused Space) or a wake ping when SLEEPING; stop = `POST .../pause`. Stop and restart kill running jobs, so they need a second press within 5s.
+- `/jobs` polling for "live on Space" now skipped unless the Space is running. No new dependencies (urllib only).
+- Verified headless (Textual run_test): paused stage rendered, stop disabled when paused, restart confirm arms and expires. Start/stop not exercised (would bill).

@@ -11,6 +11,7 @@ Backend: Python FastAPI (`backend/app.py`, `uvicorn backend.app:app --port 8000`
 5. **Colab is the GPU backend; FastAPI is the front door.** Local CPU runs `tribe/` scripts for smoke tests only. Full videos go through Colab bridge. Never commit large videos/weights/preds.
 
 ## Rule index
+- What runs where (TUI → Space → local backend), step by step: `ARCHITECTURE.md`
 - Business logic + scoring contract: `.ai/rules/01-business-logic.md`
 - Stack, commands, Colab↔FastAPI bridge: `.ai/rules/02-tech-stack.md`
 - Report UI assets (md/png/json, no Figma/Lottie yet): `.ai/rules/03-ui-ux-assets.md`

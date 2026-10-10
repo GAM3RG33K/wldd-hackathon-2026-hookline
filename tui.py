@@ -33,7 +33,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Footer, Input, Static, Tree
+from textual.widgets import Button, Footer, Input, Static, Tree
 
 ROOT = Path(__file__).parent.resolve()
 SAMPLES = ROOT / "samples"
@@ -84,6 +84,44 @@ def hf_token():
         return out.strip().splitlines()[-1] if out.strip() else ""
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------- Space control (HF Hub REST, no extra deps)
+
+SPACE_REPO = os.environ.get("HOOKLINE_SPACE_REPO", "wlddhq/hookline-tribe")
+HF_API = f"https://huggingface.co/api/spaces/{SPACE_REPO}"
+# HF runtime stage -> (glyph, word, style) for the header + Space modal
+STAGE_VIEW = {"RUNNING": ("●", "live", "bold green"), "RUNNING_BUILDING": ("●", "live, rebuilding", "green"),
+              "RUNNING_APP_STARTING": ("◐", "restarting", "yellow"), "APP_STARTING": ("◐", "starting", "yellow"),
+              "BUILDING": ("◐", "building", "yellow"), "PAUSED": ("○", "paused", "red"),
+              "SLEEPING": ("○", "sleeping", "red"), "STOPPED": ("○", "stopped", "red"),
+              "BUILD_ERROR": ("✕", "build error", "bold red"), "RUNTIME_ERROR": ("✕", "runtime error", "bold red"),
+              "CONFIG_ERROR": ("✕", "config error", "bold red"), "NO_APP_FILE": ("✕", "no app file", "bold red")}
+
+
+def space_runtime(token):
+    """{stage, hardware, requested, sleep_s} from the HF Hub (works while the Space is paused)."""
+    r = http_json(f"{HF_API}/runtime", token, timeout=10)
+    hw = r.get("hardware") or {}
+    return {"stage": r.get("stage", "?"), "hardware": hw.get("current"), "requested": hw.get("requested"),
+            "sleep_s": r.get("gcTimeout"), "error": (r.get("errorMessage") or "")[:200]}
+
+
+def space_ping(token):
+    """GET /health on the Space itself. Wakes a sleeping Space; returns (ok, ms or error)."""
+    t0 = time.time()
+    try:
+        ok = bool(http_json(f"{SPACE}/health", token, timeout=15).get("ok", True))
+        return ok, f"{(time.time() - t0) * 1000:.0f} ms"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, type(e).__name__
+
+
+def space_control(verb, token):
+    """verb: restart (also resumes a paused Space) | pause. Billing starts on restart."""
+    return http_json(f"{HF_API}/{verb}", token, timeout=20, data=b"")
 
 
 def load_corpus():
@@ -292,6 +330,101 @@ class PathPrompt(ModalScreen):
         self.dismiss(ev.value.strip().strip("'\""))
 
 
+class SpaceScreen(ModalScreen):
+    """Live status of the GPU Space + ping / start / restart / stop, without leaving the TUI.
+
+    Stop and restart kill any running job, so both ask for a second press within 5s.
+    """
+
+    BINDINGS = [Binding("escape,S", "dismiss", "Close"), Binding("p", "do('ping')", "Ping"),
+                Binding("s", "do('start')", "Start"), Binding("r", "do('restart')", "Restart"),
+                Binding("x", "do('stop')", "Stop")]
+    DEFAULT_CSS = """
+    SpaceScreen { align: center middle; }
+    SpaceScreen > Vertical { width: 76; height: auto; border: round $accent; padding: 1 2; background: $panel; }
+    SpaceScreen #sp-body { height: auto; }
+    SpaceScreen #sp-buttons { height: 3; margin-top: 1; }
+    SpaceScreen Button { min-width: 12; margin-right: 1; }
+    SpaceScreen #sp-msg { height: auto; margin-top: 1; }
+    """
+    CONFIRM = {"stop": "pause the Space (stops billing, kills running jobs)",
+               "restart": "restart the Space (kills running jobs, reloads models ~3-5 min)"}
+
+    def __init__(self):
+        super().__init__()
+        self.armed = None  # (verb, time) waiting for its confirming second press
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(id="sp-body")
+            with Horizontal(id="sp-buttons"):
+                yield Button("Ping  p", id="ping")
+                yield Button("Start  s", id="start", variant="success")
+                yield Button("Restart  r", id="restart", variant="warning")
+                yield Button("Stop  x", id="stop", variant="error")
+            yield Static(id="sp-msg")
+
+    def on_mount(self):
+        self.query_one(Vertical).border_title = f"GPU Space · {SPACE_REPO}"
+        self.query_one(Vertical).border_subtitle = "esc close"
+        self.render_status()
+        self.app.poll_space(ping=True)
+        self.set_interval(2, lambda: self.app.poll_space(ping=False))  # faster while open
+        self.set_interval(1, self.render_status)
+
+    def render_status(self):
+        st = self.app.space_rt
+        stage = st.get("stage")
+        glyph, word, style = STAGE_VIEW.get(stage, ("?", (stage or "unknown").lower(), "dim"))
+        t = Text()
+        t.append(f"{glyph} {word.upper()}\n", style)
+        rows = [("stage", stage or "—"), ("hardware", st.get("hardware") or f"none (requested {st.get('requested') or '?'})"),
+                ("sleep after", fmt_dur(st.get("sleep_s")) + " idle" if st.get("sleep_s") else "—"),
+                ("health", st.get("health") or "not pinged"),
+                ("jobs", f"{st['jobs']} running/queued" if st.get("jobs") is not None else "—"),
+                ("checked", f"{time.time() - st['checked']:.0f}s ago" if st.get("checked") else "—")]
+        for k, v in rows:
+            t.append(f"{k:<12}", "dim")
+            t.append(f"{v}\n")
+        if st.get("error"):
+            t.append(f"\n{st['error']}\n", "red")
+        if st.get("fetch_error"):
+            t.append(f"\nstatus check failed: {st['fetch_error']}\n", "yellow")
+        running = stage in ("RUNNING", "RUNNING_BUILDING")
+        t.append("\nBilling runs while live (a100-large ≈ $2.50/hr).", "dim")
+        self.query_one("#sp-body", Static).update(t)
+        self.query_one("#start", Button).disabled = running or stage in ("BUILDING", "APP_STARTING")
+        self.query_one("#stop", Button).disabled = stage in ("PAUSED", "STOPPED")
+        if self.armed and time.time() - self.armed[1] > 5:
+            self.armed = None
+            self.note("")
+
+    def note(self, msg, style=""):
+        self.query_one("#sp-msg", Static).update(Text(msg, style))
+
+    @on(Button.Pressed)
+    def pressed(self, ev: Button.Pressed):
+        self.action_do(ev.button.id)
+
+    def action_do(self, verb):
+        if not self.app.token:
+            self.note("No HF token: run `hf auth login` or export HF_TOKEN.", "yellow")
+            return
+        if self.query_one(f"#{verb}", Button).disabled:
+            self.note(f"{verb} not available in the current stage.", "dim")
+            return
+        if verb in self.CONFIRM:
+            if not (self.armed and self.armed[0] == verb):
+                self.armed = (verb, time.time())
+                jobs = self.app.space_rt.get("jobs")
+                warn = f"  {jobs} job(s) active!" if jobs else ""
+                self.note(f"Press {verb} again within 5s to {self.CONFIRM[verb]}.{warn}", "bold yellow")
+                return
+            self.armed = None
+        self.note(f"{verb} …", "cyan")
+        self.app.space_action(verb, self)
+
+
 HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
 
 [b]Try it in 3 steps[/b]
@@ -319,6 +452,7 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   x        stop the running Space job (exits after the current item)
   ctrl+r   restart the running Space job (no re-upload, model stays loaded)
   tab      switch between reels and report
+  S        GPU Space: live status, ping / start / restart / stop (stop + restart ask twice)
   ?        this help        q  quit
 
 [b]Reading the scores[/b]
@@ -376,6 +510,7 @@ class Hookline(App):
         Binding("t", "toggle('text')", "Transcript", show=False),
         Binding("l", "cycle_lang", "Language", show=False),
         Binding("ctrl+r", "restart", "Restart job", show=False),
+        Binding("S", "space", "Space"),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
@@ -393,6 +528,7 @@ class Hookline(App):
         # transcript: auto = speech gate decides per reel (songs/humming scored on visuals + sound)
         self.text_mode = "auto"
         self.lang = "auto"  # transcription language: auto (Hindi/English/Hinglish), hi, en
+        self.space_rt = {}  # Space runtime: stage, hardware, sleep_s, health, jobs, checked
 
     # ---- layout
     def compose(self) -> ComposeResult:
@@ -427,6 +563,7 @@ class Hookline(App):
         self.watch_live = None  # Space job id whose progress is on screen (from "live on Space")
         self.set_interval(5, self.tick_saved)   # batch/other clients save reports while we run
         self.set_interval(3, self.tick_live)    # running/queued jobs on the Space, from any client
+        self.set_interval(15, lambda: self.poll_space(ping=False))  # Space stage for the header
 
     def build_tree(self):
         tree = self.query_one("#reels", Tree)
@@ -481,7 +618,7 @@ class Hookline(App):
         self.refresh_saved(force=False)
 
     def tick_live(self):
-        if self.token:
+        if self.token and self.space_rt.get("stage") in ("RUNNING", "RUNNING_BUILDING", None):
             self.fetch_live()
 
     @work(thread=True, exclusive=True, group="live")
@@ -491,6 +628,7 @@ class Hookline(App):
         except Exception:
             return
         active = [j for j in jobs if j.get("status") in ("queued", "running")]
+        self.space_rt["jobs"] = len(active)
         self.call_from_thread(self.update_live, active)
         sid = self.watch_live
         if sid:
@@ -538,7 +676,12 @@ class Hookline(App):
     # ---- status line + header
     def set_header(self):
         b = Text("● up", "green") if self.backend_ok else Text("○ down", "red")
-        s = Text("● token", "green") if self.token else Text("○ no token", "yellow")
+        if not self.token:
+            s = Text("○ no token", "yellow")
+        else:
+            glyph, word, style = STAGE_VIEW.get(self.space_rt.get("stage"), ("·", "checking", "dim"))
+            s = Text(f"{glyph} {word}", style)
+            s.append("  S", "bold")
         t = Text.assemble(("HOOKLINE", "bold"), ("  video in → attention preview before posting", "dim"))
         mods = Text("   full run: ")
         for key, name in (("video", "v video"), ("audio", "a audio"), ("text", "t transcript")):
@@ -576,6 +719,7 @@ class Hookline(App):
                     break
         self.backend_ok = ok
         self.call_from_thread(self.set_header)
+        self.call_from_thread(self.poll_space, False)
         if not ok:
             self.call_from_thread(self.say, "Backend failed to start; see /tmp/hookline_backend.log", "red")
 
@@ -1112,6 +1256,56 @@ class Hookline(App):
 
     def action_help(self):
         self.push_screen(HelpScreen())
+
+    # ---- GPU Space status + control
+    def action_space(self):
+        self.push_screen(SpaceScreen())
+
+    @work(thread=True, exclusive=True, group="space-rt")
+    def poll_space(self, ping=False):
+        if not self.token:
+            return
+        try:
+            rt = space_runtime(self.token)
+            self.space_rt.update(rt, checked=time.time(), fetch_error="")
+        except Exception as e:
+            self.space_rt.update(fetch_error=str(e)[:120], checked=time.time())
+        if self.space_rt.get("stage") not in ("RUNNING", "RUNNING_BUILDING"):
+            self.space_rt.update(jobs=None, health=None)
+        elif ping:  # only ping a live Space here; pinging a sleeping one wakes it (and bills)
+            ok, info = space_ping(self.token)
+            self.space_rt["health"] = f"{'ok' if ok else 'failing'} · {info}"
+        self.call_from_thread(self.set_header)
+
+    @work(thread=True, group="space-ctl")
+    def space_action(self, verb, screen):
+        tok = self.token
+        stage = self.space_rt.get("stage")
+        try:
+            if verb == "ping":
+                ok, info = space_ping(tok)
+                self.space_rt["health"] = f"{'ok' if ok else 'failing'} · {info}"
+                msg, style = (f"Ping {info}: Space answered." if ok else
+                              f"Ping {info}: not answering (paused/starting?)."), "green" if ok else "yellow"
+            elif verb == "start" and stage == "SLEEPING":
+                space_ping(tok)  # a request wakes a sleeping Space
+                msg, style = "Wake request sent; Space is starting (~2-4 min).", "green"
+            elif verb in ("start", "restart"):
+                space_control("restart", tok)  # also resumes a paused Space
+                msg, style = ("Start requested; Space is booting (~3-5 min, billing from now)." if verb == "start"
+                              else "Restart requested; models reload in ~3-5 min."), "green"
+            elif verb == "stop":
+                space_control("pause", tok)
+                msg, style = "Space paused: billing stopped. Start it again from here.", "green"
+            else:
+                return
+        except urllib.error.HTTPError as e:
+            msg, style = f"{verb} failed: HTTP {e.code} {e.reason}", "red"
+        except Exception as e:
+            msg, style = f"{verb} failed: {e}", "red"
+        self.call_from_thread(screen.note, msg, style)
+        self.call_from_thread(self.say, f"Space: {msg}", style)
+        self.call_from_thread(self.poll_space, False)
 
 
 if __name__ == "__main__":
