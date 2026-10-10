@@ -93,8 +93,18 @@ def load_corpus():
         rows = list(csv.DictReader(meta.open())) if meta.exists() else []
         vids = {p.stem: p for p in (SAMPLES / s / "videos").glob("*.mp4")}
         corpus[s] = [{"id": r["video_id"], "path": str(vids[r["video_id"]]), "views": r.get("views", ""),
+                      "followers": r.get("follower_band", ""),
                       "stratum": r.get("page_type") or s} for r in rows if r["video_id"] in vids]
     return corpus
+
+
+# Page size marker, shown next to views as context only (never a scoring input: judge the video).
+PAGE_SIZE = {"10k-50k": ("!", "small creator"), "50k-200k": ("$", "medium page"),
+             "200k-1M": ("$$", "big creator"), "1M+": ("$$$", "highest followers")}
+
+
+def page_marker(band):
+    return PAGE_SIZE.get((band or "").strip(), ("?", "unknown page size"))
 
 
 def saved_reports():
@@ -285,6 +295,10 @@ HELP = """[b]Hookline[/b] — preview a reel's attention before posting.
   g        regenerate the selected report from its raw model output (current formulas)
   v a t    toggle video / audio / transcript for full TRIBE runs
   l        transcription language: auto (Hindi/English/Hinglish) / hi / en
+
+[b]Page size[/b] (next to views; context only, never a scoring input)
+  !  small creator 10k-50k    $  medium page 50k-200k
+  $$ big creator 200k-1M      $$$ highest followers 1M+
            transcript cycles auto / on / off. auto: a speech gate checks how much of the
            reel is speech; songs and humming are scored on visuals + sound, not words
   x        stop the running Space job (exits after the current item)
@@ -408,7 +422,9 @@ class Hookline(App):
             items = self.corpus[s]
             node = tree.root.add(f"{s} ({len(items)})", data={"kind": "folder"}, expand=(s == "face"))
             for v in items:
-                label = Text(f"{v['id']}  ")
+                mark, _ = page_marker(v.get("followers"))
+                label = Text(f"{v['id']} ")
+                label.append(f"{mark:<3} ", "bold yellow" if mark.startswith("$") else "bold cyan")
                 label.append(f"{fmt_views(v['views'])} views", "dim")
                 node.add_leaf(label, data={"kind": "reel", **v})
         if not any(self.corpus.values()):
@@ -610,11 +626,13 @@ class Hookline(App):
         self.current_job = None
         for w in ("#tiles", "#strip-h", "#strip", "#moments", "#recs-h", "#recs", "#method"):
             self.query_one(w).display = False
-        views = f"{fmt_views(d.get('views'))} views · " if d.get("views") else ""
+        mark, size = page_marker(d.get("followers"))
+        views = (f"{fmt_views(d.get('views'))} views · {mark} {size} ({d.get('followers')} followers) · "
+                 if d.get("views") else "")
         self.query_one("#title", Static).update(Text.assemble(
             (d["id"], "bold"), (f"   {d.get('stratum', '')}\n\n", "dim"),
             (f"{views}{short_path(d['path'])}\n", "dim"),
-            ("Views are validation context only; scoring judges the video, never the account.\n\n", "dim italic"),
+            ("Views and page size are context only; scoring judges the video, never the account.\n\n", "dim italic"),
             ("Enter / p", "bold"), "  preview report (seconds)\n",
             ("f", "bold"), "          full TRIBE brain model on GPU Space (minutes)\n",
             ("v a t", "bold"), "      toggle video / audio / transcript for the full run"))
