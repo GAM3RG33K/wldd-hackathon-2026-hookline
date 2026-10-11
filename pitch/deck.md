@@ -1,149 +1,255 @@
-title: Hookline — see how a reel lands before it's posted
-showcase: mohit-burad-review-79k-in-7hours
+title: Hookline
+subtitle: From Video to Virality
+author: Harshvardhan Joshi (harshvardhanjoshi@wldd.in)
+team: WLDD Hackathon 2026 · Problem 01
+showcase: OL003
+problem: mohit-burad-review-79k-in-7hours
 emotional: FL041
+caption_example: Konsa colour bola? 😂 Police ask the shop owner the stolen phone's colour: fuchsia pink
+caption_lift: 3.3
 
 ---
+
+@title
+
+# Hookline
+
+## From Video to Virality
+
+Note: Introduce the problem statement and yourself.
+
+---
+
+@cover
 
 # Hookline
 
 ## See how a reel lands **before** it's posted
 
-Second-by-second attention · hook · hold · viral potential with reasons · emotions · timestamped edits
+{{curve:showcase}}
+
+Note: One line: Hookline predicts how a typical viewer responds to every second of a reel, explains the verdict, and tells the creator what to change and where.
+
+---
+
+@section The problem
+
+# Creators find out too late
+
+{{survival:problem}}
+
+Note: A real reel from the hackathon set. The predicted share of viewers who reach the end is tiny, and the creator would only learn it after posting.
+
+---
+
+@section Our answer
+
+# Every second, judged before posting
+
+::: icons
+eye | Seen, heard, said | one timeline
+hook | Hook | first 3 seconds
+drop | Drop-offs | where and why
+heart | Emotions | what it evokes
+gauge | Viral potential | with reasons
+cut | Edits | at timestamps
+:::
 
 Judge the video, never the account.
 
-Note: 15 s. One line: we predict how a typical viewer's brain responds to every second of a reel, then turn that into edits a creator can make today.
+---
+
+@section How we got here
+
+# Twelve problems, twelve answers
+
+::: flow
+No watch-time labels → Predict the viewer's brain response
+Big pages bias views → Video-only inputs
+Visuals, sound and words → One per-second timeline
+Hinglish speech → Hinglish speech model
+Songs aren't speech → Speech gate + song match
+20-minute runs → Faster virality predictor
+A score nobody can question → Breakdown: boost and drag
+Tuning needed the predictor → Predictor gives evidence, server scores
+Stories without words → Scenes, music, faces, voice
+Emotions that weren't there → "No clear emotion" by default
+Generic advice → Edits at timestamps, model-checked
+Spam captions → Relevance test
+:::
 
 ---
 
-# The problem
+@section How it's built
 
-- Creators learn a reel failed **after** posting: the viewers who scrolled away at second 2 are already gone.
-- No tool shows, before publishing, **where** viewers are pulled in, where attention fades, and **why**.
-- Script-only feedback misses most of it: a reel lands through what is **seen, heard and said together, over time**.
-
-Note: Problem statement in our words. Point at "why": every number in our report has a reason attached.
-
----
-
-# What Hookline gives a creator
-
-{{scores:showcase}}
-
-- **Hook / hold / finish** and attention for every second, with drop zones and the strongest stretch
-- **Viral potential** with a breakdown: the biggest boost and the biggest drag
-- **Emotions** the reel evokes, and the strong peaks (sorrow, outrage, amusement, awe …)
-- **Editing suggestions** at exact timestamps, each backed by evidence from the reel's own best part
-- **Caption check**: used only if it really describes this video
-
-Note: Read the tiles out loud for the showcase reel. Then click through to the full report on the next slide.
-
----
-
-# One reel, end to end
-
-{{report:showcase}}
-
-Note: Scroll the embedded report: tiles, chart with emotion dots (play the video, the playhead tooltip follows), caption section, "Why viral potential", suggestions, transcript.
-
----
-
-# How it's built
+# Three parts, one timeline
 
 {{architecture}}
 
-- **TUI** (Textual): pick a reel or your own file, add a caption, live progress with ETA, queue, stop / restart, Space control.
-- **GPU Space** (Hugging Face, A100): runs every model and returns **raw data only**.
-- **Local backend** (FastAPI): builds every report from the raw data. Formula changes re-score all reels in seconds, no GPU.
+---
 
-Note: Judging criterion 1. Emphasise the split: GPU produces evidence, scoring is transparent local code.
+@section How it's built
+
+# The Virality Predictor
+
+{{model}}
+
+Note: This is the only slide that names the underlying model. TRIBE v2 is a research model under CC BY-NC (non-commercial): fine for this prototype, a licence question for any product.
 
 ---
 
-# What we look at
+@section How it's built
 
-| | What | Model |
-|---|---|---|
-| **Seen** | frames over time · scene situations · faces · cuts and motion | V-JEPA2 · CLIP · YuNet + ViT expressions · ffmpeg |
-| **Heard** | audio over time · speech vs song vs humming · music mood · voice tone · rhythm | Wav2Vec-BERT · AST · CLAP · wav2vec2 · librosa |
-| **Said** | Hindi / English / Hinglish words with timestamps · meaning · emotion | faster-whisper Hinglish · Llama-3.2-3B · GoEmotions |
-| **Brain** | predicted response of 20,484 cortex points per step | **TRIBE v2** (Meta) |
-| **Caption** | does it describe this reel? | CLIP vs frames + 55 other reels · multilingual MiniLM |
+# Models and tools behind it
 
-Songs and humming are judged on visuals + sound, not lyrics. Every signal is per second, on one timeline.
-
-Note: Criterion 2. Why each: TRIBE predicts how a typical brain responds to the combined stimulus, so seen + heard + said are fused by a model trained on real brain recordings, not by hand-written rules.
-
----
-
-# Method: from brain response to a score
-
-1. **Attention per second** = 60% brain engagement (sensory + language + attention regions minus the mind-wandering network) + 40% edit signals (cuts, motion, loudness, words/s). Normalised within the video: the average second ≈ 50.
-2. **Hook** = first 3 s (+ speech early, + a cut or movement, − silent start). **Hold / finish** from a simulated viewer curve.
-3. **Emotion**: 20 emotions (Cowen & Keltner) from scenes, faces, music, voice, words, sounds. **No clear emotion** unless a channel is clearly above its usual level.
-4. **Viral potential** = 40% hook + 25% few drop-offs + 20% strong moments + 15% ending, lifted by strong emotional peaks and a relevant caption.
-
-{{why:showcase}}
-
-Note: Criterion 3. Why TRIBE over a classifier trained on views: no watch-time labels exist; a brain-response model gives moment-level signal without labels. Why heuristics on top: transparent, re-scorable, honest about being uncalibrated.
+::: icons
+ear | Speech gate | AST · speech, song, humming, music | AST=https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593
+spark | Hinglish speech | Whisper Hinglish (faster-whisper) | Whisper Hinglish=https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex, faster-whisper=https://github.com/SYSTRAN/faster-whisper
+eye | Scenes | CLIP · the situation on screen | CLIP=https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+heart | Faces | YuNet + ViT · expressions | YuNet=https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet, ViT=https://huggingface.co/trpakov/vit-face-expression
+wave | Music mood | CLAP · and librosa rhythm | CLAP=https://huggingface.co/laion/clap-htsat-fused, librosa=https://librosa.org
+heart | Voice tone | wav2vec2 · arousal, valence | wav2vec2=https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
+check | Words | GoEmotions · emotion in speech | GoEmotions=https://huggingface.co/SamLowe/roberta-base-go_emotions
+target | Caption check | multilingual MiniLM + CLIP | MiniLM=https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2, CLIP=https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+clock | Song match | Chromaprint fingerprints | Chromaprint=https://acoustid.org/chromaprint
+film | Cuts and motion | ffmpeg | ffmpeg=https://ffmpeg.org
+laptop | User interface | Textual | Textual=https://textual.textualize.io
+report | Server | FastAPI · reports, deck | FastAPI=https://fastapi.tiangolo.com
+:::
 
 ---
 
-# Emotion that is earned, not forced
+@section From Video to Virality
 
-{{emotion:emotional}}
+# How a reel becomes a verdict
 
-- Fixed-list classifiers always pick *something*. We abstain: in the product review, false "amusement" fell from **84% to 14%** once each signal had to beat its own usual level.
-- Faces are read only when big and confident, against the person's resting face.
-- Audible laughter is counted separately from predicted amusement.
-
-Note: Tell the FL041 story: a rescued elephant, no speech, mournful music: sorrow peaks found from music and scenes alone.
-
----
-
-# How we know it works
-
-{{validation}}
-
-- **Known cases** re-checked after every scoring change: emotional (FL041), performed comedy (rajpsych), product review.
-- **Edits are model-checked**: each suggestion is rendered with ffmpeg and re-run through TRIBE against a no-edit baseline (re-encoding alone shifts engagement ~5%).
-- **Captions**: borrowed / filler captions ignored (z ≤ 1.5), true ones matched (z 2.3–3.9) on real reels.
-
-Note: Criterion 4. Be honest: the virality weights are hand-set and the logistic fit (leave-one-out 65% on 20 reels) is a dry run, not applied. That is the next step with more labelled reels.
+::: icons
+film | Take apart | frames · audio · words
+ear | Classify sound | speech · song · music
+brain | Virality Predictor | brain response / second
+gauge | Measure | 9 signal channels
+wave | Fuse | attention 0–100 / second
+target | Detect | hook · drops · peaks
+check | Verdict + edits | with reasons
+:::
 
 ---
 
-# Recommendations a creator can act on
+@section From Video to Virality
 
-{{suggestions:showcase}}
+# What we read from every second
 
-- Each one names **one edit at one timestamp**, with the evidence against the reel's own best stretch.
-- Ranked by estimated viewers lost. `V` renders the edit and re-runs it on the GPU to check it really helps.
-
-Note: Criterion 5. Point at the evidence column: it compares the weak part with this reel's own best part, so advice is specific to the video.
-
----
-
-# Live demo
-
-1. **Give us a reel** (and its caption, optional).
-2. TUI: `o` → pick the file → paste the caption → **Enter**.
-3. Watch the live progress: steps, chunks, ETA (~2.5 s of GPU per video second).
-4. The report opens: tiles, chart, emotions, caption verdict, why-viral, edits. `v` opens it in the browser.
-
-All reports: **/reports** · this deck: **/pitch** (edit `pitch/deck.md`, refresh)
-
-Note: Before the demo: wake the Space (TUI S, then s) about 5 minutes ahead; it sleeps after 30 minutes idle. Fallback: the showcase report on slide 4.
+::: matrix
+Seen | frames · situations · faces · cuts · motion
+Heard | sound type · music mood · voice tone · rhythm
+Said | Hinglish words · meaning · emotion
+Brain | Virality Predictor: 20,484 cortex responses
+Caption | fits this reel? matches the speech?
+:::
 
 ---
 
-# Limits and next
+@section From Video to Virality
 
-- Scores are **within-video and uncalibrated** — model estimates, not measured retention.
-- Humour and abstract captions need meaning, not pattern matching: next is a video-language model ("what does this evoke, if anything?").
-- Fit the virality weights on reels with known outcomes; per-niche calibration.
-- Same pipeline, more creators: the GPU step is a single API.
+# The indicators, on a real reel
+
+{{indicators:showcase}}
+
+---
+
+@section From Video to Virality
+
+# Emotion that is predicted
+
+{{emotionband:emotional}}
+
+::: bars False "amusement" on a product review (share of seconds)
+Before: forced choice | 84 | 84%
+*After: "no clear emotion" by default | 14 | 14%
+:::
+
+---
+
+@section From Video to Virality
+@report showcase
+
+# A caption counts only if it fits
+
+::: examples OL003: two cops, a stolen phone, "which colour?"
+good | Konsa colour bola? 😂 Police ask the shop owner the stolen phone's colour: fuchsia pink | frames z 6.9 · speech z 3.7 · +3.3
+good | Cop asks which phone and colour, X phone 15 plus pro max in fuchsia pink 😂 #comedy | frames z 6.5 · speech z 4.8 · +3.3
+bad | This scene never gets old 😂 | z 1.0 · too vague · ignored
+bad | follow for more #viral #reels #trending | z −1.2 · filler · ignored
+bad | Best skincare routine for glowing skin | z 0.2 · another topic · ignored
+:::
+
+A caption counts from z 1.6 on the frames or the speech, and fully at z 3.0. It must describe what is seen or said.
+
+---
+
+@section The verdict
+
+# Viral potential, with its reasons
+
+{{whybars:showcase}}
+
+---
+
+@section See it
+
+# One reel, end to end
+
+{{seeit:showcase}}
+
+---
+
+@section Does it work?
+
+# Checked against real views
+
+{{scatter}}
+
+Note: The weights are hand-set; the ranking is only weakly aligned with views so far. The next step is fitting on reels with known outcomes.
+
+---
+
+@section What a creator does next
+
+# Edits, placed on the timeline
+
+{{edits:showcase}}
+
+---
+
+@section Live
+
+# Your reel, live
+
+::: icons
+film | Your reel | + caption
+laptop | Pick it | o · caption · Enter
+clock | Watch it run | ≈ 2.5 s / second
+report | Read the verdict | v opens the web report
+:::
+
+{{launch}}
+
+---
+
+@section Next
+
+# Where it goes next
+
+::: icons
+gauge | Tweak model and formula | to be more accurate
+brain | Understand and predict | complex human emotions, the "vibe" of the frame
+spark | One tool to predict them all | for any creator
+:::
+
+---
+
+@closing
 
 # Thank you
 
-Note: Close with the one-liner and invite the judges to bring their own reel.
+## Bring us a reel. We'll show you how it lands.

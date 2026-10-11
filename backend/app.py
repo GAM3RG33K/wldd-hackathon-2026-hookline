@@ -20,7 +20,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 HERE = Path(__file__).parent.resolve()
@@ -28,6 +28,7 @@ ROOT = HERE.parent
 TRIBE = ROOT / "tribe"
 sys.path.insert(0, str(TRIBE))
 import hookline_report as HL  # noqa: E402
+from backend import theme as T  # noqa: E402
 
 OUT = HERE / "out"
 OUT.mkdir(exist_ok=True)
@@ -85,7 +86,7 @@ INDEX = """<!doctype html><meta charset=utf-8><meta name=viewport content="width
 .card{border:1px solid #ddd;border-radius:12px;padding:1rem;margin:1rem 0}.muted{color:#666;font-size:.9em}
 button{background:#111;color:#fff;border:0;border-radius:8px;padding:.6rem 1.2rem;cursor:pointer}</style>
 <h1>Hookline prototype</h1>
-<p>Upload a reel → attention preview in seconds. PREVIEW mode: real video/audio signals, synthetic-preview brain stand-in. Full TRIBE run via Colab upgrades the same report schema.</p>
+<p>Upload a reel → attention preview in seconds. PREVIEW mode: real video/audio signals, synthetic-preview brain stand-in. A full analysis upgrades the same report.</p>
 <div class=card><h3>1. Try instant demo</h3><p><a href="/demo"><button>Open sneaker demo report</button></a>
 <a href="/reports"><button>All reports (live)</button></a></p>
 <p class=muted>Precomputed 28s 9:16 reel: hook 61.4, drops 0:09–0:13 + 0:26–0:29.</p></div>
@@ -311,7 +312,7 @@ def verify_report(job_id: str, redirect: bool = False):
         return JSONResponse({"status": "already running"}, status_code=409)
     p = OUT / job_id / "report.json"
     if not p.exists() or not (OUT / job_id / "raw" / "meta.json").exists():
-        return JSONResponse({"error": "needs a full TRIBE report built from raw output"}, status_code=404)
+        return JSONResponse({"error": "needs a full-analysis report"}, status_code=404)
 
     def run():
         import verify as VF
@@ -373,6 +374,25 @@ def report_video(job_id: str):
     if v is None:
         return JSONResponse({"error": "local video not found"}, status_code=404)
     return FileResponse(v, media_type="video/mp4")
+
+
+@app.get("/report/{job_id}/poster.jpg")
+def report_poster(job_id: str):
+    """One frame of the reel (at 1 s) for decks and previews; cached next to the report."""
+    import subprocess
+    p = OUT / job_id / "report.json"
+    if not p.exists():
+        return JSONResponse({"error": "unknown job"}, status_code=404)
+    out = OUT / job_id / "poster.jpg"
+    if not out.exists():
+        v = _local_video(job_id, json.loads(p.read_text()))
+        if v is None:
+            return JSONResponse({"error": "local video not found"}, status_code=404)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(v), "-frames:v", "1",
+                        "-vf", "scale=540:-2", str(out)], check=False)
+    if not out.exists():
+        return JSONResponse({"error": "could not extract a frame"}, status_code=500)
+    return FileResponse(out, media_type="image/jpeg")
 
 
 EMO_COLORS = {'amusement': '#f5b301', 'excitement': '#f97316', 'awe': '#7c3aed', 'admiration': '#a78bfa', 'adoration': '#f9a8d4', 'satisfaction': '#2dd4bf', 'craving': '#d97706', 'surprise': '#ec4899', 'interest': '#06b6d4', 'nostalgia': '#c4b5fd', 'romance': '#e11d48', 'hope': '#84cc16', 'empathic_pain': '#fb7185', 'sadness': '#3b82f6', 'fear': '#ef4444', 'anger': '#b91c1c', 'disgust': '#65a30d', 'awkwardness': '#a3a3a3', 'moved': '#22c55e', 'laughter': '#f5b301', 'outrage': '#b91c1c', 'sorrow': '#3b82f6'}
@@ -536,7 +556,7 @@ def _suggestions_html(r: dict, job_id: str) -> str:
     btn = ""
     if can_verify and not running:
         btn = (f'<form method=post action="/report/{job_id}/verify?redirect=true" style="display:inline">'
-               f'<button>Verify top 3 edits (~2-3 min GPU each)</button></form>')
+               f'<button>Verify top 3 edits (~2-3 min each)</button></form>')
     st = f'<span class=muted>{html.escape(status)}</span>' if status else ""
     return (f'<h2>Editing suggestions <span class=muted style="font-weight:400;font-size:1rem">'
             f'ranked by viewers lost</span></h2>{btn} {st}<ol class=sugs>{"".join(items)}</ol>')
@@ -574,6 +594,23 @@ def analysed_at(report_json: Path) -> float:
 REPORT_SORTS = {"viral": "viral first", "latest": "latest first", "oldest": "oldest first"}
 
 
+@app.post("/launch-ui")
+def launch_ui(request: Request):
+    """Open the Hookline user interface (TUI) in a new Terminal window. Local demo only: refuses
+    anything but requests from this machine, and only ever runs ./run-demo.sh."""
+    import subprocess
+    if (request.client.host if request.client else "") not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "Only available on the presenting machine."}, status_code=403)
+    if sys.platform != "darwin":
+        return JSONResponse({"error": "Launching a terminal is only set up for macOS. Run ./run-demo.sh instead."})
+    cmd = f"cd {json.dumps(str(ROOT))} && ./run-demo.sh"
+    r = subprocess.run(["osascript", "-e", f'tell application "Terminal" to do script {json.dumps(cmd)}',
+                        "-e", 'tell application "Terminal" to activate'], capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        return JSONResponse({"error": f"Could not open Terminal: {r.stderr.strip()[:160]}. Run ./run-demo.sh instead."})
+    return {"message": "The user interface is opening in a new Terminal window."}
+
+
 @app.get("/pitch", response_class=HTMLResponse)
 def pitch():
     """Pitch deck rendered from pitch/deck.md with live report blocks (edit the file, refresh)."""
@@ -604,33 +641,60 @@ def list_reports(sort: str = "viral"):
         audio = (r.get("audio") or {}).get("type") or "-"
         song = (r.get("audio") or {}).get("song")
         at = analysed_at(p)
-        rows.append((s["virality"], at, f'<tr><td><a href="/report/{job}/view">{html.escape(name)}</a></td>'
-                    f'<td>{"full TRIBE" if full else "preview"}</td>'
-                    f'<td><b>{s["virality"]:.0f}</b> {html.escape(s.get("virality_tag", s.get("virality_band", "")))}</td>'
-                    f'<td>{s["hook_pct"]:.0f}</td><td>{s["hold_rate_pct"]:.0f}%</td><td>{s["finish_pct"]:.0f}%</td>'
-                    f'<td>{html.escape(audio)}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
-                    f'<td class=muted>{r.get("duration_s", "?")}s</td>'
-                    f'<td class=muted>{_time.strftime("%b %d %H:%M", _time.localtime(at))}</td></tr>'))
+        v = s["virality"]
+        tag = s.get("virality_tag", s.get("virality_band", ""))
+        cap = r.get("caption")
+        rows.append((v, at, full, f'<tr><td class=reel><a href="/report/{job}/view">{html.escape(name)}</a>'
+                    f'<span class=sub>{"Full analysis" if full else "Quick preview"}'
+                    f'{(" + caption matched" if cap.get("relevance", 0) > 0 else " + caption ignored") if cap else ""}</span></td>'
+                    f'<td><div class=vp><b class=num>{v:.0f}</b><span class=meter><i style="width:{max(0, min(100, v)):.0f}%"></i></span>'
+                    f'<span class="chip {T.tier_class(tag)}">{html.escape(tag)}</span></div></td>'
+                    f'<td class=num>{s["hook_pct"]:.0f}</td><td class=num>{s["hold_rate_pct"]:.0f}%</td><td class=num>{s["finish_pct"]:.0f}%</td>'
+                    f'<td class=muted>{html.escape(audio.replace("_", " "))}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
+                    f'<td class="num muted">{r.get("duration_s", 0):.0f} s</td>'
+                    f'<td class="num muted mono">{_time.strftime("%b %d %H:%M", _time.localtime(at))}</td></tr>'))
     key = {"viral": lambda x: (-x[0], -x[1]), "latest": lambda x: -x[1], "oldest": lambda x: x[1]}[sort]
-    rows = [r[2] for r in sorted(rows, key=key)]
-    sort_links = ('<label>Sort <select id=sort onchange="location.search=\'?sort=\'+this.value">'
-                  + "".join(f'<option value={k}{" selected" if k == sort else ""}>{label}</option>'
-                            for k, label in REPORT_SORTS.items()) + "</select></label>")
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Hookline reports</title>
+    n_full = sum(1 for x in rows if x[2])
+    rows = [x[3] for x in sorted(rows, key=key)]
+    options = "".join(f'<option value={k}{" selected" if k == sort else ""}>{label}</option>' for k, label in REPORT_SORTS.items())
+    empty = '<tr><td colspan=7 class=empty>No reports yet. Analyze a reel in the TUI (Enter or a) and it appears here.</td></tr>'
+    return f"""<!doctype html><html lang=en><head>{T.page_head("Hookline reports")}
 <script>/* live list: reload every 5s, but never while the sort menu is open */
 setInterval(()=>{{if(document.activeElement?.id!=="sort")location.reload()}},5000)</script>
-<style>:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--accent:#2563eb}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--accent:#60a5fa}}}}
-body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
-a{{color:var(--accent)}} .muted{{color:var(--muted)}} table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
-th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
-.wrap{{overflow-x:auto}}
-select{{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;margin-left:4px}}</style>
-<h1>Hookline reports <span class=muted style=font-weight:400>({len(rows)}, refreshes every 5s)</span></h1>
-<p class=muted>{sort_links} · Viral potential, hook, hold and finish are model estimates. <a href="/">Upload a video</a> · <a href="/pitch">Pitch deck</a></p>
-<div class=wrap><table><tr><th>Reel</th><th>Run</th><th>Viral potential</th><th>Hook</th><th>Hold</th><th>Finish</th>
-<th>Audio</th><th>Length</th><th>Analysed</th></tr>{''.join(rows) or '<tr><td colspan=9 class=muted>No reports yet.</td></tr>'}</table></div>"""
+<style>{T.TOKENS}
+/* Layout: one column, max 1180px; header bar, summary line, one table panel. */
+.wrapper{{max-width:1180px;margin:0 auto;padding-block:28px 48px;padding-inline:clamp(16px,4vw,32px);display:flex;flex-direction:column;gap:20px}}
+.bar{{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
+.brand{{font:700 1.05rem var(--display);display:flex;align-items:center;gap:8px}}
+.brand i{{width:9px;height:9px;border-radius:50%;background:var(--accent)}}
+.nav{{display:flex;gap:16px;font-size:.92rem}}
+h1{{font-size:clamp(1.7rem,3vw,2.4rem)}}
+.summary{{display:flex;flex-wrap:wrap;gap:10px 24px;align-items:center;color:var(--muted);font-size:.95rem}}
+.summary b{{color:var(--ink);font-family:var(--mono);font-weight:500}}
+label.sort{{display:flex;gap:8px;align-items:center;margin-left:auto;font-size:.9rem;color:var(--muted)}}
+select{{font:500 .92rem var(--sans);color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 10px}}
+.panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow-x:auto}}
+table{{width:100%;border-collapse:collapse;font-size:.94rem}}
+th,td{{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:middle}}
+tbody tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:var(--sunken)}}
+th{{font:500 .72rem/1.2 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--sunken);white-space:nowrap}}
+th.num,td.num{{text-align:right;white-space:nowrap}}
+td.reel a{{font-weight:600;text-decoration:none;color:var(--ink)}} td.reel a:hover{{color:var(--accent)}}
+td.reel .sub{{display:block;font-size:.8rem;color:var(--muted)}}
+.vp{{display:flex;align-items:center;gap:10px;white-space:nowrap}}
+.vp b{{font:600 1.15rem var(--mono);min-width:2ch;text-align:right}}
+.meter{{width:72px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}} .meter i{{display:block;height:100%;background:var(--accent)}}
+.empty{{text-align:center;color:var(--muted);padding:40px 16px}}
+.note{{font-size:.85rem;color:var(--muted)}}
+</style></head><body><div class=wrapper>
+<div class=bar><span class=brand><i></i>Hookline</span><nav class=nav><a href="/pitch">Pitch deck</a><a href="/">Upload a video</a></nav></div>
+<h1>Reports</h1>
+<div class=summary><span><b>{len(rows)}</b> reels</span><span><b>{n_full}</b> full analyses</span><span><b>{len(rows) - n_full}</b> quick previews</span><span>refreshes every 5 s</span>
+<label class=sort for=sort>Sort <select id=sort onchange="location.search='?sort='+this.value">{options}</select></label></div>
+<div class=panel><table><thead><tr><th>Reel</th><th>Viral potential</th><th class=num>Hook</th><th class=num>Hold</th><th class=num>Finish</th>
+<th>Audio</th><th class=num>Length</th><th class=num>Analysed</th></tr></thead><tbody>{''.join(rows) or empty}</tbody></table></div>
+<p class=note>Viral potential, hook, hold and finish are model estimates: within-video, uncalibrated. Views and follower counts are never inputs.</p>
+</div></body></html>"""
 
 
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
@@ -642,7 +706,7 @@ def view_report(job_id: str):
     r = json.loads(p.read_text())
     s = r["scores"]
     full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
-    mode = "full TRIBE" if full else "preview"
+    mode = ("Full analysis" + (" + caption" if r.get("caption") else "")) if full else "Quick preview"
     md = OUT / job_id / "report.md"
     if not md.exists() or md.read_text(errors="ignore").startswith('{"error"'):
         HL.write_md(r, md)  # Space jobs may come back without markdown; it only needs report.json
@@ -678,18 +742,23 @@ def view_report(job_id: str):
                    for x in r["recommendations"])
     tile = lambda name, val, sub="": (f'<div class="tile"><div class="k">{name}</div><div class="v">{val}</div>'
                                       f'<div class="s">{sub}</div></div>')
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Hookline report {job_id}</title>
+    return f"""<!doctype html><html lang=en><head>{T.page_head(f"Hookline report · {html.escape(report_name(r, job_id) or job_id)}")}
 {'<meta http-equiv=refresh content=10>' if str(r.get('verify_status', '')).startswith('running') else ''}
-<style>
-:root{{--bg:#fff;--fg:#111;--muted:#666;--line:#e3e3e3;--att:#2563eb;--surv:#9ca3af;--hook:#16a34a;--drop:#dc2626;--strong:#7c3aed}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#111;--fg:#eee;--muted:#999;--line:#2a2a2a;--att:#60a5fa;--surv:#8b8f97}}}}
-body{{font-family:system-ui;background:var(--bg);color:var(--fg);max-width:1200px;margin:2rem auto;padding:0 16px}}
-a{{color:var(--att)}} .song{{color:var(--strong)}}
-h1 span{{color:var(--muted);font-weight:500}} .muted{{color:var(--muted)}}
-.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:1rem 0}}
-.tile{{border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}}
-.tile .k{{color:var(--muted);font-size:.85rem}} .tile .v{{font-size:2rem;font-weight:700}} .tile .s{{color:var(--muted)}}
+<style>{T.TOKENS}
+/* Layout: one reading column, max 1180px; tiles, then video + chart, then explanation sections. */
+body{{max-width:1180px;margin:0 auto;padding-block:28px 56px;padding-inline:clamp(16px,4vw,32px)}}
+.song{{color:var(--strong)}}
+h1{{font-size:clamp(1.6rem,3vw,2.3rem)}} h1 span{{color:var(--muted);font-weight:500;font-family:var(--sans);font-size:.6em}}
+h2{{font-size:1.25rem;margin:2rem 0 .6rem}} h2 span{{font-family:var(--sans);font-weight:400;font-size:.8em}}
+p{{margin:.5em 0}}
+.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--gap);margin:1.2rem 0}}
+.tile{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;text-align:left}}
+.tile .k{{font:500 .72rem/1.2 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}}
+.tile .v{{font:700 clamp(1.8rem,3.4vw,2.5rem)/1.15 var(--display)}} .tile .s{{color:var(--muted);font-size:.9rem}}
+section.why table,table{{font-variant-numeric:tabular-nums}}
+section.why,section.caption,ul.transcript{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px}}
+ol.sugs{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px 16px 44px}}
+section.why h2,section.caption h2{{margin-top:0}}
 .chart{{margin:1.5rem 0;width:100%}}
 .plot{{position:relative;height:30vh;min-height:180px;margin-left:36px;border-left:1px solid var(--line);border-bottom:1px solid var(--line)}}
 .plot svg{{position:absolute;inset:0;width:100%;height:100%;overflow:visible}}
@@ -756,10 +825,10 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {png_html}
 <p class=muted>Viral potential: {html.escape(s.get('virality_method', 'legacy formula'))}.
 Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored within the video).</p>
-<p><i>{html.escape(r['method'])}</i> · neural_source={html.escape(str(r.get('neural_source', '?')))}</p>
+<p><i>{html.escape(r['method'])}</i> · {"Full analysis by the Virality Predictor" if full else "Quick preview (synthetic brain stand-in)"}</p>
 <p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a>
 {f'<form method=post action="/report/{job_id}/regenerate?redirect=true" style="display:inline"> · <button>Regenerate from raw model output</button></form>' if (OUT / job_id / "raw" / "meta.json").exists() else ''}
-{'<span class=muted> · built locally from raw TRIBE output</span>' if r.get("regenerated_locally") else ''}</p>
+{'<span class=muted> · built locally from the raw analysis</span>' if r.get("regenerated_locally") else ''}</p>
 <script>
 (() => {{
   const v = document.getElementById("reel"), ph = document.getElementById("playhead");

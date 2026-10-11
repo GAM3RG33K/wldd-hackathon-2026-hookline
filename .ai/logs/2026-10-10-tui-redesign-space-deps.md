@@ -390,3 +390,28 @@
 ## 2026-10-11 — Pitch deck web app (/pitch)
 - `pitch/deck.md` (12 slides mapped to the 5 judging criteria) rendered by `backend/pitch.py` at `/pitch`: keyboard / swipe navigation, speaker notes (`n`), full screen (`f`), progress bar; live blocks `{{scores|report|why|emotion|suggestions:KEY}}`, `{{architecture}}`, `{{validation}}` (sample reels with full runs: n, median views, mean viral potential, Spearman vs views: all +0.20, face +0.38, faceless -0.11, outliers +0.02 at build time). Edit the file and refresh; no restart. Link from /reports.
 - GPU wrap-up: deployed Space commit 0492f58, re-ran the 3 check reels (review +caption: viral 45, no strong peaks; FL041 +caption: 66, sorrow 19s; rajpsych_2: 54, outrage 2s + sorrow 2s), no other jobs, Space PAUSED 03:38. No GPU work until next morning.
+
+## 2026-10-11 — Pitch redesign + shared visual system
+- `backend/theme.py`: one token set (cool neutrals, cobalt attention accent, semantic good / caution / loss, light + dark), Bricolage Grotesque display, IBM Plex Sans body, IBM Plex Mono for timecodes and numbers (Google Fonts with system fallbacks). Used by /pitch, /reports and the report view.
+- Deck rewritten (16 slides): cover with the showcase reel's real attention curve; the brief mapped to the 5 judging criteria; 12 product problems we hit with what we built (no labels -> TRIBE v2; judge the video; fusion; Hinglish; songs; speed; explainable score; GPU/scoring split; wordless stories; false emotions; generic advice; spam captions); connected system diagram; 7-step file-to-verdict pipeline; extraction table; indicators (attention, hook, frame changes, drop-offs, strongest moments, emotions); caption evaluation; verdict with live why-viral; live showcase report; emotion; validation; recommendations; live demo; next. Renderer gained @cover, @section, ::: cards (problem -> what we built), ::: steps.
+- /reports rebuilt: header bar, summary (reels, full GPU runs), sort dropdown, viral-potential value + meter + tier chip, timecode-style numbers. Report view moved onto the same tokens and type.
+
+## 2026-10-11 — Deck v3: WLDD branding, graphics over text
+- Visual reference: WLDD "MX Player case study" deck (navy ground, royal-blue blocks, heavy white Montserrat, teal ring charts, numbered circles, »» chevrons, phone mockups). Applied to /pitch only (single dark look by choice); /reports + report view keep the shared light/dark system.
+- 18 slides, one idea each: cover (phone mockup playing the showcase reel + its attention curve), survival curve with big numbers, icon rows, 12-row problem » answer flow, speed bars + numbered stat blocks, connected architecture, 7-step icon pipeline, layer matrix, annotated indicator chart (hook, drop-offs, strongest, peak, cuts, viewers remaining), emotion timeline + before/after bars, caption z bars with thresholds, why-viral diverging bars, ring-chart scores + embedded report, validation scatter (viral potential vs log views by stratum, Spearman chips), edits on the timeline, live demo, next, closing.
+- New: `/report/{id}/poster.jpg` (frame at 1 s, cached) so the phone shows the reel before playback; videos play only on their slide.
+
+## 2026-10-11 — Deck naming + new showcase
+- Deck wording: "the user interface" (TUI), "the server" (local backend), "the virality predictor" / "video analysis model" (GPU Space); architecture diagram and flow rows updated.
+- Re-scored all reports with the current emotion scoring (38 ok; 3 failed: their videos were deleted) so the deck compares like with like.
+- Showcase = highest viral potential among full-run reports after re-scoring: OL003 (78, Popular, 19 s, face data). The problem slide keeps the weak product review (2% reach the end) via a separate `problem:` key.
+
+## 2026-10-11 — Deck v4 (21 slides): title screen, Virality Predictor page, tools page, report buttons
+- Title screen "Hookline — From Video to Virality", author Harshvardhan Joshi; footer on every slide shows title + author. Section "From file to verdict" -> "From Video to Virality".
+- Model naming: TRIBE v2 and "GPU" appear only on the new "The Virality Predictor" page (what TRIBE v2 is, how we use it, the Higgsfield idea we followed, CC BY-NC licence note, links to both articles). Everywhere else it is "the Virality Predictor"; new "Models and tools behind it" page (12 cards).
+- Order: architecture -> Virality Predictor -> models and tools -> speed. No more report iframe: every slide showing one reel's data has an "Open full report" button in the header (cover: under the title; `@report KEY` for text-only slides).
+- Card grids size by count (<=3 large, 4 -> 2x2, 5-6 -> 3 columns, 7+ -> 4 columns). "Emotion that is predicted". OL003 caption do / don't with real CPU-scored z values (scene captions frames z 6.5-6.9, speech z 3.7-4.8, +3.3; vague / filler / off-topic ignored). Verdict slide shows the optional caption row (+3.3, 78 -> 81). "See it" = ring charts + playing phone. Live slide: "Launch the user interface" button -> POST /launch-ui (localhost only, macOS Terminal running ./run-demo.sh). Next: "Tweak model and formula", "Understand and predict ... the vibe of the frame", "One tool to predict them all".
+
+## 2026-10-11 — Final deck polish + reports wording
+- Removed the speed slide (internal optimisation). Validation legend: large reel-type colour discs, bigger dots and chips. Models and tools cards carry link chips (top right) to every public model / library actually used.
+- Reports page + report view: "Full analysis" (+ caption matched / ignored), "Quick preview", "N full analyses · M quick previews"; no GPU / TRIBE wording; footer says "Full analysis by the Virality Predictor".
