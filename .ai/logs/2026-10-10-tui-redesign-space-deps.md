@@ -416,3 +416,7 @@
 - Removed the speed slide (internal optimisation). Validation legend: large reel-type colour discs, bigger dots and chips. Models and tools cards carry link chips (top right) to every public model / library actually used.
 - Reports page + report view: "Full analysis" (+ caption matched / ignored), "Quick preview", "N full analyses · M quick previews"; no GPU / TRIBE wording; footer says "Full analysis by the Virality Predictor".
 - /reports lists full analyses only (quick previews stay on disk, reachable by URL); summary "N reels, full analysis".
+
+## 2026-10-11 — Analysing the remaining sample reels
+- `tribe/rerun_all.py --missing`: every sample reel with no full-analysis report (78: 39 face, 39 faceless; ~52 min of video). Batch started 12:17 on the A100, shortest first; at 13:22: 36 done, 0 failed. Chain pauses the Space when done.
+- Validation slide is live: at 63 reels the rank correlation with views is +0.11 overall (face +0.16, faceless -0.03, extreme viral +0.03); it was +0.26 at 27 reels. Re-check after the batch; fit the virality weights on the full set next.

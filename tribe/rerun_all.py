@@ -1,6 +1,7 @@
 """Re-run every reel that has a saved report on the Space (full TRIBE + all raw channels), then import
 through the local backend so the new report replaces the old one. Sequential: one GPU job at a time.
-Usage: python tribe/rerun_all.py [--only=name1,name2] [--skip=name1,...]"""
+Usage: python tribe/rerun_all.py [--only=name1,name2] [--skip=name1,...]
+       python tribe/rerun_all.py --missing   # sample reels that have no full analysis yet"""
 import glob
 import json
 import sys
@@ -32,6 +33,27 @@ def reels():
         cap = (r.get("caption") or {}).get("text") or ""  # keep the caption it was analysed with
         seen.setdefault(name.lower(), (name, v, r.get("duration_s") or 0, cap))
     return sorted(seen.values(), key=lambda x: x[2])  # shortest first: results land early
+
+
+def missing():
+    """Sample reels (samples/*/videos) with no full-analysis report yet."""
+    import subprocess
+    done = set()
+    for f in glob.glob(str(ROOT / "backend/out/*/report.json")):
+        try:
+            r = json.load(open(f))
+        except Exception:
+            continue
+        if r.get("preview") is False or "full" in str(r.get("neural_source", "")):
+            v = r.get("local_video")
+            done.add((r.get("source_id") or (Path(v).stem if v else "")).lower())
+    out = []
+    for v in sorted(ROOT.glob("samples/*/videos/*.mp4")):
+        if v.stem.lower() not in done:
+            d = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(v)],
+                               capture_output=True, text=True).stdout.strip()
+            out.append((v.stem, str(v), float(d or 0), ""))
+    return sorted(out, key=lambda x: x[2])
 
 
 def log(msg):
@@ -80,7 +102,8 @@ def run(name, video, caption=""):
 def main():
     only = next((a.split("=", 1)[1].split(",") for a in sys.argv if a.startswith("--only=")), None)
     skip = next((a.split("=", 1)[1].split(",") for a in sys.argv if a.startswith("--skip=")), [])
-    todo = [x for x in reels() if (not only or x[0] in only) and x[0] not in skip]
+    pool = missing() if "--missing" in sys.argv else reels()
+    todo = [x for x in pool if (not only or x[0] in only) and x[0] not in skip]
     log(f"batch start: {len(todo)} reels, {sum(x[2] for x in todo):.0f}s of video")
     for i, (name, video, dur, caption) in enumerate(todo, 1):
         log(f"[{i}/{len(todo)}] {name} ({dur:.0f}s){' + caption' if caption else ''}")
