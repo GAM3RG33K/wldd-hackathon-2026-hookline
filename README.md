@@ -11,7 +11,7 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 ```
 
 - GPU work runs on the Hugging Face Space `wlddhq/hookline-tribe` (A100). Start it from the TUI with `S` → `s`; it sleeps after 30 min idle. Needs an HF token (`hf auth login`).
-- Web reports: `http://localhost:8000/reports` · pitch deck: `http://localhost:8000/pitch` (←/→, `n` notes, `f` full screen).
+- Web reports: `http://localhost:8000/reports` (full analyses only) · pitch deck: `http://localhost:8000/pitch` (←/→, `n` notes, `f` full screen).
 
 ## Features
 
@@ -31,6 +31,7 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 **Score and explain**
 - Attention per second, hook (first 3s), hold, finish, drop zones, strongest moments, peaks.
 - **Viral potential** with a tag (Low reach → Viral potential) and a **"Why viral potential N"** breakdown: each factor's pull vs a typical reel, biggest boost and biggest drag.
+- **Explore the score** on any report: switch each factor in or out to see a what-if score, read the step-by-step calculation, and **edit the weights** (attention weights must add up to 1; lifts 0-1). New weights apply to every report at once, no re-analysis. `/reports` has an **Ignore captions** switch to compare scores without captions.
 - **Emotion**: 20 emotions predicted from scenes, faces, music, voice, words and sounds; strong peaks (amusement, awe, outrage, sorrow, being moved, fear, disgust, empathic pain); audible laughter counted separately; emotion dots on the chart follow the video playhead.
 - **Caption check**: a caption counts only if it describes this video (frames and speech); filler or borrowed captions are ignored. A relevant caption adds context and lifts viral potential, shown in its own report section.
 
@@ -65,4 +66,4 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 - `AGENTS.md` — core beliefs, rule index, verification loop.
 - `.ai/rules/` — scoring contract, stack and Space API, report surfaces. `.ai/research/` — findings (emotion, scoring, Space). `.ai/logs/` — session logs.
 
-Sample reels (`samples/`) are hackathon-only data and are not in this repo.
+Sample reels (`samples/`, including the three presentation videos in `samples/presentation-videos/`) are hackathon-only data and are not in this repo.

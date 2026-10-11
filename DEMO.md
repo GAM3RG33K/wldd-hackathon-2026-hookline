@@ -1,7 +1,8 @@
 # Hookline — demo cues
 
 ## Before
-- Present from `localhost:8000/pitch` (slide 4 embeds the showcase report; slide 11 is the live demo). Change the showcase reel in the deck's front matter.
+- Present from `localhost:8000/pitch`. No live run: slide 18 "The demo reels" links the three presentation videos' reports (`samples/presentation-videos/`, analysed in advance). Showcase and demo reels are set in the deck's front matter.
+- On a report, the "Why viral potential" section can be explored live: factor switches (what-if), the calculation box, and the weights panel (applies to all reports; reset to defaults afterwards).
 - Wake the GPU Space ~5 min early: `./run-demo.sh` → `S` → `s` (start). Header shows `space ● live`.
 - Pick 2–3 reels with fresh full-TRIBE reports (TUI "saved reports", latest first): one emotional (FL041), one comedy (rajpsych_2), one product review.
 - Browser tabs: `localhost:8000/reports` (sort dropdown: viral / latest / oldest), one `/report/<id>/view`.

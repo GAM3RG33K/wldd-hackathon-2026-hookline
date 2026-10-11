@@ -93,4 +93,5 @@ def lift(block, virality):
     """Points a relevant caption adds to viral potential (0 when ignored)."""
     if not block or block["relevance"] <= 0:
         return 0.0
-    return float(CAPTION_LIFT * block["relevance"] * (100.0 - virality))
+    import weights as WT
+    return float(WT.load()["caption"] * block["relevance"] * (100.0 - virality))

@@ -3,7 +3,7 @@
 ## Current (HYPOTHESIS, uncalibrated)
 - `CFG`: `w_neural=0.6, w_signal=0.4; hook_seconds=3; hook_k=1.3; attn_k=1.2; drop_thresh=35, drop_min_len=2; scene_thresh=0.3; hold_floor=0.93, hold_span=0.065; silence_db=-45`.
 - Attention `A = 100*sigmoid(1.2*zs(smooth(0.6N+0.4S)))`; hook bonuses `+0.3` speech ≤1.5s / `+0.3` cut-or-move ≤2s / `−0.4` silent >1s.
-- Viral potential (`VIRALITY_WEIGHTS`): `0.40 hook + 0.25 drop-free share + 0.20 strong-attention share (×2, cap 100) + 0.15 ending`, then strong-emotion lift `+0.5*(strength/100)*(100-base)`. Tags `<35 Low reach, <55 Average, <70 Above average, <85 Popular, else Viral potential`.
+- Viral potential: attention base = weighted average of hook / drop-free share / strong-attention share (×2, cap 100) / ending, default weights 0.40 / 0.25 / 0.20 / 0.15 (must sum to 1, editable from any report page, `tribe/weights.py`), then strong-emotion lift `+0.5*(strength/100)*(100-v)` and caption lift `+0.15*relevance*(100-v)`. Tags `<35 Low reach, <55 Average, <70 Above average, <85 Popular, else Viral potential`.
 - History: v1 `0.45 hook + 0.30 hold + 0.25 mean(A)` had a near-constant `mean(A)≈50` term and a length penalty via hold → replaced 2026-10-10.
 - Explainability: `virality_breakdown` (pull vs typical = weight × (factor − 50)) + `virality_summary` (biggest boost / drag).
 

@@ -1,0 +1,8 @@
+{
+ "hook": 0.4,
+ "drop_free": 0.25,
+ "strong_moments": 0.2,
+ "ending": 0.15,
+ "emotion_lift": 0.5,
+ "caption": 0.5
+}

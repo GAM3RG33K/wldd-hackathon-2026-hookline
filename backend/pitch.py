@@ -431,7 +431,34 @@ LAUNCH = """<div class=launch><button type=button id=launchbtn class=cta>Launch 
 <span id=launchmsg class=muted>Opens the Hookline app in a new Terminal window on this computer.</span></div>"""
 
 
+def _demos(meta, reports, A):
+    """One card per demo reel: poster, viral potential, scores, top emotion, link to its full report."""
+    names = [n.strip() for n in meta.get("demos", "").split(",") if n.strip()]
+    cards = []
+    for i, n in enumerate(names, 1):
+        if n.lower() not in reports:
+            cards.append(f'<article class="demo pending"><div class=poster><span>{i:02d}</span></div><div class=dbody>'
+                         f'<h3>{E(n)}</h3><p class=muted>Analysis in progress…</p></div></article>')
+            continue
+        job, r = reports[n.lower()]
+        s = r["scores"]
+        sm = ((r.get("emotion") or {}).get("summary") or {})
+        top = ", ".join(x["emotion"] for x in sm.get("dominant_emotions", [])[:2]) or "no clear emotion"
+        cards.append(
+            f'<article class=demo><a class=poster href="/report/{job}/view" target=_blank rel=noopener>'
+            f'<img src="/report/{job}/poster.jpg" alt="frame from {E(n)}"><span>{i:02d}</span></a>'
+            f'<div class=dbody><h3>{E(n)}</h3>'
+            f'<div class=dvp><b>{s["virality"]:.0f}</b><span class="chip {theme.tier_class(s.get("virality_tag"))}">{E(s.get("virality_tag", ""))}</span></div>'
+            f'<dl><div><dt>Hook</dt><dd>{s["hook_pct"]:.0f}</dd></div><div><dt>Hold</dt><dd>{s["hold_rate_pct"]:.0f}%</dd></div>'
+            f'<div><dt>Finish</dt><dd>{s["finish_pct"]:.0f}%</dd></div><div><dt>Length</dt><dd>{r.get("duration_s", 0):.0f} s</dd></div></dl>'
+            f'<p class=muted>Emotion: {E(top.replace("_", " "))}</p>'
+            f'<a class=rbtn href="/report/{job}/view" target=_blank rel=noopener>Open report ↗</a></div></article>')
+    return f'<div class="demos grid" {grid_attrs(len(names))}>{"".join(cards)}</div>'
+
+
 def _block(kind, key, meta, reports, A):
+    if kind == "demos":
+        return _demos(meta, reports, A)
     if kind == "model":
         return MODEL
     if kind == "launch":
@@ -757,6 +784,20 @@ h1{font-weight:800;letter-spacing:-.01em}
 .cta{font:800 1.05rem var(--sans);color:var(--bg);background:var(--accent);border:0;padding:14px 26px;border-radius:3px;cursor:pointer}
 .cta:hover{filter:brightness(1.08)} .cta:disabled{opacity:.6;cursor:default}
 .brand .by{font:500 .9rem var(--sans);color:var(--muted)}
+/* demo reels */
+.demos{display:grid;gap:var(--gap)}
+.demo{background:var(--surface);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column}
+.demo .poster{position:relative;display:block;aspect-ratio:16/10;background:var(--blue);overflow:hidden}
+.demo .poster img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s}
+.demo .poster:hover img{transform:scale(1.03)}
+.demo .poster span{position:absolute;left:12px;top:12px;width:34px;height:34px;border-radius:50%;background:var(--blue);color:#fff;font:800 .85rem/34px var(--sans);text-align:center}
+.demo.pending .poster{display:flex;align-items:center;justify-content:center}
+.dbody{padding:16px 18px 18px;display:flex;flex-direction:column;gap:10px;flex:1}
+.dbody h3{font-size:1.05rem;word-break:break-word}
+.dvp{display:flex;align-items:center;gap:12px} .dvp b{font:800 2.6rem/1 var(--display);color:var(--accent)}
+.dbody dl{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0}
+.dbody dl div{display:flex;flex-direction:column} .dbody dt{font:600 .7rem var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.dbody dd{margin:0;font:700 1.15rem var(--display)} .dbody .rbtn{margin-top:auto;align-self:flex-start}
 @media (max-width:900px){.model,.excols,.seeit{grid-template-columns:1fr} .grid{grid-template-columns:repeat(min(var(--cols,2),2),minmax(0,1fr))!important}
   .brand .by{display:none}}
 .slidehead .dot{width:30px;height:30px;border-radius:50%;background:var(--blue);color:#fff;font:700 .78rem/30px var(--sans);text-align:center}

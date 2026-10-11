@@ -11,11 +11,13 @@
 - Space control from the TUI uses the Hub API: `GET/POST https://huggingface.co/api/spaces/<repo>/{runtime,restart,pause}`.
 
 ## Local backend (`backend/app.py`, :8000)
-- `POST /import/{space_job}?video=&source_id=` → fetch raw, rescore, supersede. `POST /report/{id}/regenerate`, `POST /report/{id}/verify`, `GET /report/{id}` (JSON), `/report/{id}.md|.png`, `/report/{id}/view` (web report), `/report/{id}/video`, `/reports?sort=viral|latest|oldest`.
+- `POST /import/{space_job}?video=&source_id=` → fetch raw, rescore, supersede. `POST /report/{id}/regenerate`, `POST /report/{id}/verify`, `GET /report/{id}` (JSON), `/report/{id}.md|.png`, `/report/{id}/view` (web report), `/report/{id}/video`, `/reports?sort=viral|latest|oldest&caption=off`, `GET/POST /weights` (validated; attention weights must sum to 1; re-applies to all reports), `/pitch`, `/report/{id}/poster.jpg`, `POST /launch-ui` (localhost only).
 - `POST /analyze?mode=preview` (synthetic-brain preview) is used by the web upload page only.
 
 ## Hard rules
-- Scoring lives only in `tribe/` (`CFG`, `VIRALITY_WEIGHTS` in `hookline_report.py`). The backend imports it; never duplicate formulas. `rescore` reloads `taxonomy, audio_music, emotion_fusion, suggest, hookline_report` (dependencies first); `rescore.py` itself is cached — restart the backend after editing it.
+- Scoring lives only in `tribe/` (`CFG` in `hookline_report.py`, viral-potential weights in `weights.py` / `virality_weights.json`). The backend imports it; never duplicate formulas. `rescore` reloads `taxonomy, audio_music, emotion_fusion, suggest, hookline_report` (dependencies first); `rescore.py` itself is cached — restart the backend after editing it.
+- The local server runs on the system Python 3.9: no `X | None` annotations in `backend/`.
+- Space: every model load goes through `LOAD_LOCK` (`hf_space/app.py`); parallel loads (boot warm-up + an early job) left TRIBE weights on the meta device.
 - Edit `tribe/` first, copy changed scorer files to `hf_space/`, upload with `hf upload wlddhq/hookline-tribe hf_space . --repo-type space --exclude "__pycache__/*"`. A Space build takes ~10–15 min; `RUNNING_BUILDING` is the old container.
 - Report times use the model output's mtime (`raw/preds.npy`), never `report.json` / `raw/meta.json` (re-scoring rewrites those).
 - Never commit: videos, `samples/`, `backend/out/*` (except `demo/`), `cache/`, `*.npy`, weights, tokens. HF token from `hf auth token` / `HF_TOKEN`, never pasted into files.

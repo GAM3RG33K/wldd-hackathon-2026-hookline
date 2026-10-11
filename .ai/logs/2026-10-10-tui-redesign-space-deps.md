@@ -420,3 +420,30 @@
 ## 2026-10-11 — Analysing the remaining sample reels
 - `tribe/rerun_all.py --missing`: every sample reel with no full-analysis report (78: 39 face, 39 faceless; ~52 min of video). Batch started 12:17 on the A100, shortest first; at 13:22: 36 done, 0 failed. Chain pauses the Space when done.
 - Validation slide is live: at 63 reels the rank correlation with views is +0.11 overall (face +0.16, faceless -0.03, extreme viral +0.03); it was +0.26 at 27 reels. Re-check after the batch; fit the virality weights on the full set next.
+
+## 2026-10-11 — Presentation reels + deck update
+- Stopped the --missing batch at 49 of 78 (one in-flight job cancelled); remaining sample reels can be resumed with `python tribe/rerun_all.py --missing`.
+- Moved the three presentation videos to `samples/presentation-videos/` (git-ignored like all samples) and analysed them one by one: Video-1 61 Above average (107 s, sorrow / outrage / fear peaks), Video-2 63 Above average (71 s), Video-3 59 Above average (72 s). No captions.
+- Deck: slide 18 "The demo reels" (poster, viral potential + tier, hook / hold / finish / length, top emotions, "Open report" in a new tab; `demos:` front matter), live-demo launch button removed from the deck; slide 19 "Future improvements" (complex emotions, language support, expression detection, fine-tuning on creator data, editing in the interface). Space paused afterwards.
+
+## 2026-10-11 — Fix: "Cannot copy out of meta tensor" on the first job after boot
+- Video-3 (+147-char caption) was submitted 13 s after the container booted, while the emotion warm-up threads were loading models. transformers builds models on the "meta" device through process-wide state, so TRIBE was constructed with meta weights and `.to(cuda)` failed in load_model.
+- Fix (`hf_space/app.py`): one `LOAD_LOCK` (RLock) around every model load: TRIBE `load_model` (double-checked), emotion warm-up, the AST speech-gate load and `emotion_cues` (lazy loads). Deployed (Space commit 0aa0ccf), container came up with models ready, Space paused.
+- Retried the failed job on the Space (same upload + caption): Video-3 now 64.1 Above average, caption matches (relevance 0.81, +5.0); replaced the caption-less report.
+
+## 2026-10-11 — "Ignore captions" view
+- `without_caption()` (backend/app.py): score minus the caption's own lift (`caption.virality_points`; caption emotion never makes strong peaks), tier recomputed with `HL.virality_tag`. No re-run needed.
+- /reports: "Ignore captions" switch (`?caption=off`, kept across the 5 s reload and the sort dropdown); captioned rows show the caption-less score, tier and "-N without caption" (or "caption had no effect"); summary counts reels with a caption. Viral-first sort follows the shown score.
+- Report view: switch under the tiles ("Ignore the caption · without it: 59 (Above average)"), `?caption=off` swaps the viral-potential tile; Caption section adds "without this caption: N (tier)".
+- Checked: Video-2 69 -> 63, Video-3 64 -> 59, FL041 66 -> 60, product review 45 -> 36, lift-prank unchanged (caption ignored).
+- Python 3.9 server: no `X | None` annotations.
+- Report view: replaced the "Ignore the caption" line with a switch on every "Why viral potential" factor. Client-side what-if using the server formula (attention factors re-weighted over the ones left on, then emotional-peaks lift, then caption lift, tier from VIRALITY_TIERS); updates the headline, the viral-potential tile and the total, plus a "What-if: without X ..." note; saved reports unchanged. Checked on Video-3: all on 64 (= server), caption off 59 (= without_caption), caption + hook off 53 Average.
+- "How the score is calculated" box replaces the Total line: attention base (weighted average over the attention factors switched on), each lift with its formula (weight × value/100 × (100 − running score)), result + tier; heuristic note as its subtext. Rendered server-side (`_calc_html`) and rebuilt by the factor switches.
+
+## 2026-10-11 — Editable viral-potential weights
+- `tribe/weights.py` + `tribe/virality_weights.json` (absent = defaults): hook, drop_free, strong_moments, ending (weighted average, need not sum to 1), emotion_lift, caption. Read at call time.
+- `HL.apply_weights(report, W)`: recompute from stored factor values (attention average -> emotional-peaks lift -> caption lift), rebuild breakdown / summary / caption points; finalize now ends with it. With defaults it reproduces all 95 stored scores within 0.2.
+- Server: GET/POST /weights (validated 0-1, reset) re-applies to every report instantly (95 reports, also rewrites report.md). Report view: "Weights (multipliers) for all reports" panel under the calculation box.
+- Test: caption 0.5 + hook 0.2 -> Video-3 64.1 -> 74.3 Popular, product review 45.3 -> 70.6; reset restores. Space copies synced (Dockerfile COPY weights.py); not deployed (Space in use).
+- Weights must balance: the four attention weights have to add up to exactly 1 (server refuses otherwise; the panel shows the live total and disables Apply). Lifts stay independent (0-1). Panel split into "Attention weights" (4 columns + total) and "Lifts" (2 columns). Test: caption 0.5 + hook 0.2 refused (total 0.80); hook 0.2 + drop-offs 0.45 + caption 0.5 accepted (Video-3 77.1 Popular); reset back to defaults.
+- Docs updated for the weights / what-if / calculation box / Ignore captions / demo-reels deck (README, ARCHITECTURE, DEMO, rules 01-03, research scoring). Current weights file (saved from the report page): caption lift 0.5, rest defaults.

@@ -5,6 +5,7 @@ team: WLDD Hackathon 2026 · Problem 01
 showcase: OL003
 problem: mohit-burad-review-79k-in-7hours
 emotional: FL041
+demos: Hookline-sample-Video-1, Hookline-sample-Video-2, Hookline-sample-Video-3
 caption_example: Konsa colour bola? 😂 Police ask the shop owner the stolen phone's colour: fuchsia pink
 caption_lift: 3.3
 
@@ -221,29 +222,26 @@ Note: The weights are hand-set; the ranking is only weakly aligned with views so
 
 ---
 
-@section Live
+@section Demo
 
-# Your reel, live
+# The demo reels
 
-::: icons
-film | Your reel | + caption
-laptop | Pick it | o · caption · Enter
-clock | Watch it run | ≈ 2.5 s / second
-report | Read the verdict | v opens the web report
-:::
+{{demos}}
 
-{{launch}}
+Note: Open each report in its own tab: chart with emotion dots (play the video), why-viral breakdown, edits at timestamps, transcript.
 
 ---
 
-@section Next
+@section What's next
 
-# Where it goes next
+# Future improvements
 
 ::: icons
-gauge | Tweak model and formula | to be more accurate
-brain | Understand and predict | complex human emotions, the "vibe" of the frame
-spark | One tool to predict them all | for any creator
+heart | Learn and detect complex emotions | beyond basic labels: the mood and "vibe" of a moment
+ear | More language-specific support | regional Indian languages, slang and code-mixed speech
+eye | Better expression detection | faces in motion, small and side-on faces, micro-expressions
+gauge | Fine-tune on real creator data | retention and view data from creators, per niche
+cut | Video editing in the interface | apply the suggested edits directly, then re-check the score
 :::
 
 ---

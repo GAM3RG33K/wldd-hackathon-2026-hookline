@@ -482,12 +482,64 @@ def _caption_html(r: dict) -> str:
     emo = (cap.get("emotion") or {}).get("top") or []
     if ok and emo:
         rows.append("<li>Adds emotional context: " + html.escape(", ".join(f"{e} {p:.0%}" for e, p in emo)) + "</li>")
-    effect = (f'<b>+{cap.get("virality_points", 0):.1f}</b> viral potential (relevance {cap["relevance"]:.2f})'
-              if ok else "no effect: ignored")
+    v0, tag0, _ = without_caption(r["scores"], cap)
+    effect = (f'<b>+{cap.get("virality_points", 0):.1f}</b> viral potential (relevance {cap["relevance"]:.2f}); '
+              f'without this caption: <b>{v0:.0f}</b> ({html.escape(tag0)})' if ok else "no effect: ignored")
     return (f'<section class=caption><h2>Caption <span class=muted>({html.escape(cap.get("verdict", ""))})</span></h2>'
             f'<blockquote>{html.escape(cap["text"])}</blockquote>'
             f'<p>Effect: {effect}. A caption counts from z {CAP.Z_LOW} on frames or speech; full effect at z {CAP.Z_HIGH}.</p>'
             f'<ul class=muted>{"".join(rows)}</ul></section>')
+
+
+WEIGHT_LABELS = {"hook": "Hook (first 3s)", "drop_free": "Few drop-offs", "strong_moments": "Strong-attention moments",
+                 "ending": "Ending", "emotion_lift": "Emotional peaks", "caption": "Caption context"}
+
+
+def _weights_html() -> str:
+    """Editable weights for every report: saved to tribe/virality_weights.json, applied to all reports."""
+    import importlib
+    import weights as WT
+    importlib.reload(WT)
+    W = WT.load()
+    field = lambda k: (f'<label class=wf for="w-{k}"><span>{WEIGHT_LABELS[k]}</span>'
+                       f'<input id="w-{k}" name="{k}" type=number min=0 max=1 step=0.05 value="{W[k]:g}">'
+                       f'<em>default {WT.DEFAULTS[k]:g}</em></label>')
+    lift_keys = [k for k in WT.DEFAULTS if k not in WT.BASE_KEYS]
+    changed = any(abs(W[k] - WT.DEFAULTS[k]) > 1e-9 for k in WT.DEFAULTS)
+    return (f'<details class=weights{" open" if changed else ""}><summary>Weights (multipliers) for all reports'
+            f'{" · custom" if changed else " · defaults"}</summary>'
+            f'<form id=wform>'
+            f'<fieldset class=wgroup><legend>Attention weights <span class=muted>· must add up to 1</span></legend>'
+            f'<div class="wgrid four">{"".join(field(k) for k in WT.BASE_KEYS)}</div>'
+            f'<p class=wsum>Total: <b id=wtotal>{sum(W[k] for k in WT.BASE_KEYS):.2f}</b> / 1.00</p></fieldset>'
+            f'<fieldset class=wgroup><legend>Lifts <span class=muted>· 0-1 for all</span></legend>'
+            f'<div class="wgrid two">{"".join(field(k) for k in lift_keys)}</div></fieldset>'
+            f'<div class=wactions><button type=submit class=wapply id=wapply>Apply to all reports</button>'
+            f'<button type=button id=wreset>Reset to defaults</button><span id=wmsg class=muted>'
+            f'Changes apply to every report at once.</span></div>'
+            f'</form></details>')
+
+
+def _calc_html(b: list, s: dict) -> str:
+    """Step-by-step viral-potential arithmetic (same steps the factor switches recompute in the page)."""
+    import html
+    base_rows = [x for x in b if x["key"] not in ("emotion_lift", "caption") and x.get("points") is not None]
+    if not base_rows:
+        return f'<li class=res><span>Viral potential</span><b>{s["virality"]:.0f}</b></li>'
+    ws = sum(x["weight"] for x in base_rows)
+    base = sum(x["weight"] * x["value"] for x in base_rows) / ws
+    terms = " + ".join(f'{x["weight"]:g} × {x["value"]:.0f} <i>{html.escape(x["label"].lower())}</i>' for x in base_rows)
+    out = [f'<li><span>Attention base</span><code>({terms}) ÷ {ws:g}</code><b>{base:.1f}</b></li>']
+    v = base
+    for x in b:
+        if x["key"] in ("emotion_lift", "caption") and x.get("points") is not None:
+            add = x["weight"] * (x["value"] / 100) * (100 - v)
+            out.append(f'<li><span>+ {html.escape(x["label"])}</span><code>{x["weight"]:g} × {x["value"]:.0f}/100 × '
+                       f'(100 − {v:.1f})</code><b>+{add:.1f}</b></li>')
+            v += add
+    out.append(f'<li class=res><span>Viral potential</span><code>{v:.1f}, rounded</code>'
+               f'<b>{v:.0f} <em>{html.escape(HL.virality_tag(v))}</em></b></li>')
+    return "".join(out)
 
 
 def _virality_html(r: dict) -> str:
@@ -508,21 +560,25 @@ def _virality_html(r: dict) -> str:
         bar = (f'<span class=vbar><i class="{"up" if d >= 0 else "down"}" '
                f'style="{"left:50%" if d >= 0 else f"left:{50 - w:.1f}%"};width:{w:.1f}%"></i></span>')
         pts = "" if x.get("points") is None else f'{x["points"]:.1f}'
-        rows.append(f'<tr{" class=top" if x is top else ""}><td>{html.escape(x["label"])}</td>'
+        kind = "lift" if x["key"] in ("emotion_lift", "caption") else "base"
+        toggle = (f'<label class=fsw title="Include this factor in the final rating"><input type=checkbox checked '
+                  f'data-key="{html.escape(x["key"])}" data-kind={kind} data-value="{x["value"]}" data-weight="{x["weight"]}">'
+                  f'<span></span></label>' if x.get("points") is not None else "")
+        rows.append(f'<tr{" class=top" if x is top else ""}><td class=fcell>{toggle}{html.escape(x["label"])}</td>'
                     f'<td class=num>{x["value"]:.0f}</td><td class=num>×{x["weight"]}</td><td class=num>{pts}</td>'
                     f'<td>{bar}</td><td class="num {"pos" if d >= 0 else "neg"}">{d:+.1f}</td>'
                     f'<td class=muted>{html.escape(x["explain"])}</td></tr>')
-    base = s.get("virality_base")
-    lifts = [(x["label"].lower(), x["points"]) for x in b if x["key"] in ("emotion_lift", "caption") and x.get("points")]
-    total = (f'{base:.1f} from attention' + "".join(f" + {p:.1f} {lbl}" for lbl, p in lifts) +
-             f' = <b>{s["virality"]:.0f}</b>' if base is not None else f'<b>{s["virality"]:.0f}</b>')
-    return (f'<section class=why><h2>Why viral potential {s["virality"]:.0f} '
-            f'<span class=muted>({html.escape(s.get("virality_tag", s.get("virality_band", "")))})</span></h2>'
+    calc = _calc_html(b, s)
+    tiers = json.dumps(HL.VIRALITY_TIERS)
+    return (f'<section class=why data-tiers=\'{tiers}\'><h2>Why viral potential <span id=vpnum>{s["virality"]:.0f}</span> '
+            f'<span class=muted>(<span id=vptag>{html.escape(s.get("virality_tag", s.get("virality_band", "")))}</span>)</span></h2>'
             f'<p>{html.escape(s.get("virality_summary") or "")}</p>'
-            f'<div class=wrap><table><tr><th>Factor</th><th>Score /100</th><th>Weight</th><th>Points</th>'
+            f'<p id=vpwhatif class=whatif hidden></p>'
+            f'<div class=wrap><table><tr><th>Factor <span class=muted>(switch to include / exclude)</span></th><th>Score /100</th><th>Weight</th><th>Points</th>'
             f'<th>vs a typical reel (factor at 50)</th><th></th><th>What it measures here</th></tr>{"".join(rows)}</table></div>'
-            f'<p class=muted>Total: {total}. Uncalibrated heuristic: weights are set by hand until fitted on real view '
-            f'counts; it judges the video only, never the account.</p></section>')
+            f'<div class=calcbox><h3>How the score is calculated</h3><ol id=vpcalc>{calc}</ol>'
+            f'<p class=calcnote>Uncalibrated heuristic: weights are set by hand until fitted on real view counts; '
+            f'it judges the video only, never the account.</p></div>{_weights_html()}</section>')
 
 
 def _suggestions_html(r: dict, job_id: str) -> str:
@@ -591,7 +647,51 @@ def analysed_at(report_json: Path) -> float:
     return 0.0
 
 
+def without_caption(scores: dict, cap):
+    """Viral potential if the caption had not been given: the caption's only effect on the score is
+    its own "Caption context" lift (caption emotion never makes strong peaks). Returns (score, tag, lift)."""
+    lift = float((cap or {}).get("virality_points") or 0.0)
+    v = scores["virality"] - lift
+    return v, HL.virality_tag(v), lift
+
+
 REPORT_SORTS = {"viral": "viral first", "latest": "latest first", "oldest": "oldest first"}
+
+
+@app.get("/weights")
+def get_weights():
+    import importlib
+    import weights as WT
+    importlib.reload(WT)
+    return {"weights": WT.load(), "defaults": WT.DEFAULTS}
+
+
+@app.post("/weights")
+async def set_weights(request: Request):
+    """Save new viral-potential weights and re-apply them to every report right away (no re-analysis:
+    each report keeps its factor values). Body: {"weights": {...}} or {"reset": true}."""
+    import importlib
+    import weights as WT
+    importlib.reload(WT)
+    importlib.reload(HL)
+    body = await request.json()
+    try:
+        W = WT.reset() if body.get("reset") else WT.save(body.get("weights") or {})
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    n = 0
+    for p in OUT.glob("*/report.json"):
+        try:
+            r = json.loads(p.read_text())
+            if not (r.get("scores") or {}).get("virality_breakdown"):
+                continue
+            HL.apply_weights(r, W)
+            p.write_text(json.dumps(r, indent=1))
+            HL.write_md(r, p.with_name("report.md"))
+            n += 1
+        except Exception as e:  # noqa: BLE001 - one bad report must not block the rest
+            print(f"[weights] skipped {p.parent.name}: {e}", flush=True)
+    return {"weights": W, "updated": n}
 
 
 @app.post("/launch-ui")
@@ -620,13 +720,14 @@ def pitch():
 
 
 @app.get("/reports", response_class=HTMLResponse)
-def list_reports(sort: str = "viral"):
+def list_reports(sort: str = "viral", caption: str = "on"):
     """All saved reports: viral first (default), latest first or oldest first; refreshes itself so
     batch results appear as they land."""
     import html
     import time as _time
     sort = "latest" if sort == "recent" else sort if sort in REPORT_SORTS else "viral"
-    rows = []
+    ignore_cap = caption == "off"
+    rows, n_cap = [], 0
     for p in OUT.glob("*/report.json"):
         try:
             r = json.loads(p.read_text())
@@ -646,11 +747,18 @@ def list_reports(sort: str = "viral"):
         v = s["virality"]
         tag = s.get("virality_tag", s.get("virality_band", ""))
         cap = r.get("caption")
+        lift = 0.0
+        if cap:
+            n_cap += 1
+            if ignore_cap:
+                v, tag, lift = without_caption(s, cap)
+        delta = (f'<span class=delta>{-lift:+.1f} without caption</span>' if ignore_cap and lift > 0 else
+                 '<span class="delta same">caption had no effect</span>' if ignore_cap and cap else "")
         rows.append((v, at, full, f'<tr><td class=reel><a href="/report/{job}/view">{html.escape(name)}</a>'
                     f'<span class=sub>{"Full analysis" if full else "Quick preview"}'
                     f'{(" + caption matched" if cap.get("relevance", 0) > 0 else " + caption ignored") if cap else ""}</span></td>'
                     f'<td><div class=vp><b class=num>{v:.0f}</b><span class=meter><i style="width:{max(0, min(100, v)):.0f}%"></i></span>'
-                    f'<span class="chip {T.tier_class(tag)}">{html.escape(tag)}</span></div></td>'
+                    f'<span class="chip {T.tier_class(tag)}">{html.escape(tag)}</span>{delta}</div></td>'
                     f'<td class=num>{s["hook_pct"]:.0f}</td><td class=num>{s["hold_rate_pct"]:.0f}%</td><td class=num>{s["finish_pct"]:.0f}%</td>'
                     f'<td class=muted>{html.escape(audio.replace("_", " "))}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
                     f'<td class="num muted">{r.get("duration_s", 0):.0f} s</td>'
@@ -661,7 +769,7 @@ def list_reports(sort: str = "viral"):
     empty = '<tr><td colspan=7 class=empty>No reports yet. Analyze a reel in the TUI (Enter or a) and it appears here.</td></tr>'
     return f"""<!doctype html><html lang=en><head>{T.page_head("Hookline reports")}
 <script>/* live list: reload every 5s, but never while the sort menu is open */
-setInterval(()=>{{if(document.activeElement?.id!=="sort")location.reload()}},5000)</script>
+setInterval(()=>{{if(!["sort","capsw"].includes(document.activeElement?.id))location.reload()}},5000)</script>
 <style>{T.TOKENS}
 /* Layout: one column, max 1180px; header bar, summary line, one table panel. */
 .wrapper{{max-width:1180px;margin:0 auto;padding-block:28px 48px;padding-inline:clamp(16px,4vw,32px);display:flex;flex-direction:column;gap:20px}}
@@ -686,12 +794,19 @@ td.reel .sub{{display:block;font-size:.8rem;color:var(--muted)}}
 .vp b{{font:600 1.15rem var(--mono);min-width:2ch;text-align:right}}
 .meter{{width:72px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}} .meter i{{display:block;height:100%;background:var(--accent)}}
 .empty{{text-align:center;color:var(--muted);padding:40px 16px}}
+.delta{{font:500 .8rem var(--mono);color:var(--bad)}} .delta.same{{color:var(--muted);font-family:var(--sans)}}
+label.capsw{{display:flex;gap:8px;align-items:center;font-size:.92rem;color:var(--ink);cursor:pointer}}
+label.capsw input{{width:18px;height:18px;accent-color:var(--accent)}}
 .note{{font-size:.85rem;color:var(--muted)}}
 </style></head><body><div class=wrapper>
 <div class=bar><span class=brand><i></i>Hookline</span><nav class=nav><a href="/pitch">Pitch deck</a><a href="/">Upload a video</a></nav></div>
 <h1>Reports</h1>
-<div class=summary><span><b>{len(rows)}</b> reels, full analysis</span><span>refreshes every 5 s</span>
-<label class=sort for=sort>Sort <select id=sort onchange="location.search='?sort='+this.value">{options}</select></label></div>
+<div class=summary><span><b>{len(rows)}</b> reels, full analysis</span><span><b>{n_cap}</b> with a caption</span><span>refreshes every 5 s</span>
+<label class=capsw for=capsw><input type=checkbox id=capsw {"checked" if ignore_cap else ""}
+ onchange="go()"> Ignore captions <span class=muted>(score as if no caption was given)</span></label>
+<label class=sort for=sort>Sort <select id=sort onchange="go()">{options}</select></label></div>
+<script>function go(){{const q=new URLSearchParams();q.set('sort',document.getElementById('sort').value);
+if(document.getElementById('capsw').checked)q.set('caption','off');location.search='?'+q.toString()}}</script>
 <div class=panel><table><thead><tr><th>Reel</th><th>Viral potential</th><th class=num>Hook</th><th class=num>Hold</th><th class=num>Finish</th>
 <th>Audio</th><th class=num>Length</th><th class=num>Analysed</th></tr></thead><tbody>{''.join(rows) or empty}</tbody></table></div>
 <p class=note>Viral potential, hook, hold and finish are model estimates: within-video, uncalibrated. Views and follower counts are never inputs.</p>
@@ -699,7 +814,7 @@ td.reel .sub{{display:block;font-size:.8rem;color:var(--muted)}}
 
 
 @app.get("/report/{job_id}/view", response_class=HTMLResponse)
-def view_report(job_id: str):
+def view_report(job_id: str, caption: str = "on"):
     import html
     p = OUT / job_id / "report.json"
     if not p.exists():
@@ -708,6 +823,10 @@ def view_report(job_id: str):
     s = r["scores"]
     full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
     mode = ("Full analysis" + (" + caption" if r.get("caption") else "")) if full else "Quick preview"
+    cap = r.get("caption")
+    v0, tag0, lift = without_caption(s, cap)
+    ignore_cap = caption == "off" and bool(cap)
+    vp_val, vp_tag = (v0, tag0) if ignore_cap else (s["virality"], s.get("virality_tag", s["virality_band"]))
     md = OUT / job_id / "report.md"
     if not md.exists() or md.read_text(errors="ignore").startswith('{"error"'):
         HL.write_md(r, md)  # Space jobs may come back without markdown; it only needs report.json
@@ -760,6 +879,38 @@ section.why table,table{{font-variant-numeric:tabular-nums}}
 section.why,section.caption,ul.transcript{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px}}
 ol.sugs{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px 16px 44px}}
 section.why h2,section.caption h2{{margin-top:0}}
+.fcell{{white-space:nowrap}} .fsw{{display:inline-flex;vertical-align:middle;margin-right:10px;cursor:pointer}}
+.fsw input{{position:absolute;opacity:0;width:1px;height:1px}}
+.fsw span{{width:34px;height:20px;border-radius:999px;background:var(--line);position:relative;transition:background .2s}}
+.fsw span::after{{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--surface);transition:transform .2s}}
+.fsw input:checked + span{{background:var(--accent)}} .fsw input:checked + span::after{{transform:translateX(14px)}}
+.fsw input:focus-visible + span{{outline:2px solid var(--accent);outline-offset:2px}}
+tr.off td{{opacity:.45}} tr.off td.fcell{{opacity:1}}
+.calcbox{{margin-top:16px;border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);padding:14px 18px}}
+.calcbox h3{{font-size:1rem;margin:0 0 8px}}
+#vpcalc{{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-variant-numeric:tabular-nums}}
+#vpcalc li{{display:grid;grid-template-columns:180px 1fr auto;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px dashed var(--line)}}
+#vpcalc li span{{font-weight:600}} #vpcalc li code{{color:var(--muted);font-size:.85rem;white-space:normal}} #vpcalc li code i{{font-style:normal;color:var(--faint)}}
+#vpcalc li b{{font:600 1rem var(--mono);text-align:right;white-space:nowrap}}
+#vpcalc li.res{{border-bottom:0;border-top:2px solid var(--line);padding-top:10px}} #vpcalc li.res b{{font:700 1.4rem var(--display);color:var(--accent)}}
+#vpcalc li.res em{{font:500 .85rem var(--sans);color:var(--muted);font-style:normal;margin-left:6px}}
+.calcnote{{margin:10px 0 0;font-size:.82rem;color:var(--muted)}}
+@media (max-width:640px){{#vpcalc li{{grid-template-columns:1fr auto}} #vpcalc li code{{grid-column:1/-1;order:3}}}}
+.weights{{margin-top:14px;border:1px solid var(--line);border-radius:var(--r);padding:10px 16px;background:var(--surface)}}
+.weights summary{{cursor:pointer;font-weight:600}}
+.wgroup{{border:1px solid var(--line);border-radius:var(--r);padding:10px 14px 4px;margin:12px 0 0}}
+.wgroup legend{{font-weight:600;padding:0 6px;font-size:.92rem}}
+.wgrid{{display:grid;gap:12px;margin:8px 0}} .wgrid.four{{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.wgrid.two{{grid-template-columns:repeat(2,minmax(0,1fr));max-width:50%}}
+@media (max-width:640px){{.wgrid.four{{grid-template-columns:1fr 1fr}} .wgrid.two{{max-width:none}}}}
+.wf{{display:flex;flex-direction:column;gap:4px;font-size:.9rem}} .wf em{{font-style:normal;font-size:.75rem;color:var(--muted)}}
+.wf input{{font:600 1rem var(--mono);padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:100%;box-sizing:border-box}}
+.wsum{{margin:0 0 10px;font-size:.92rem}} .wsum b{{font-family:var(--mono)}} .wsum.bad b{{color:var(--bad)}}
+.wactions button:disabled{{opacity:.5;cursor:not-allowed}}
+.wactions{{margin-top:12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}}
+.wactions button{{font:600 .9rem var(--sans);padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}}
+.wactions .wapply{{background:var(--accent);color:var(--bg);border-color:var(--accent)}}
+.whatif{{background:var(--accent-soft);color:var(--ink);padding:8px 12px;border-radius:8px;font-size:.92rem}}
 .chart{{margin:1.5rem 0;width:100%}}
 .plot{{position:relative;height:30vh;min-height:180px;margin-left:36px;border-left:1px solid var(--line);border-bottom:1px solid var(--line)}}
 .plot svg{{position:absolute;inset:0;width:100%;height:100%;overflow:visible}}
@@ -815,7 +966,7 @@ a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
 {tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
 {tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}
 {tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
-{tile('Viral potential', f"{s['virality']:.0f}", s.get('virality_tag', s['virality_band']))}
+{tile('Viral potential' + (' · caption ignored' if ignore_cap else ''), f'<span id=tilevp>{vp_val:.0f}</span>', f'<span id=tiletag>{html.escape(vp_tag)}</span>')}
 </div>
 <div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}{_emotion_html(r)}</div></div>
 {_caption_html(r)}
@@ -831,6 +982,83 @@ Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored 
 {f'<form method=post action="/report/{job_id}/regenerate?redirect=true" style="display:inline"> · <button>Regenerate from raw model output</button></form>' if (OUT / job_id / "raw" / "meta.json").exists() else ''}
 {'<span class=muted> · built locally from the raw analysis</span>' if r.get("regenerated_locally") else ''}</p>
 <script>
+(() => {{
+  const f = document.getElementById("wform");
+  if (!f) return;
+  const msg = document.getElementById("wmsg");
+  const base = ["hook", "drop_free", "strong_moments", "ending"];
+  const total = () => base.reduce((a, k) => a + (parseFloat(f.querySelector("[name=" + k + "]").value) || 0), 0);
+  const check = () => {{
+    const t = total(), ok = Math.abs(t - 1) <= 0.001;
+    const el = document.getElementById("wtotal");
+    el.textContent = t.toFixed(2); el.parentElement.classList.toggle("bad", !ok);
+    document.getElementById("wapply").disabled = !ok;
+    return ok;
+  }};
+  f.addEventListener("input", check); check();
+  const send = async body => {{
+    msg.textContent = "Applying to all reports…";
+    try {{
+      const r = await fetch("/weights", {{method: "POST", headers: {{"Content-Type": "application/json"}}, body: JSON.stringify(body)}});
+      const j = await r.json();
+      if (!r.ok) {{ msg.textContent = j.error || "Could not save the weights."; return; }}
+      msg.textContent = "Updated " + j.updated + " reports. Reloading…";
+      setTimeout(() => location.reload(), 400);
+    }} catch (e) {{ msg.textContent = "Could not reach the server."; }}
+  }};
+  f.addEventListener("submit", e => {{
+    e.preventDefault();
+    if (!check()) {{ msg.textContent = "The attention weights must add up to 1 before you can apply them."; return; }}
+    const w = {{}};
+    f.querySelectorAll("input").forEach(i => w[i.name] = parseFloat(i.value));
+    send({{weights: w}});
+  }});
+  document.getElementById("wreset").addEventListener("click", () => send({{reset: true}}));
+}})();
+/* What-if: switch factors in or out of the final rating. Same formula as the server (hookline_report.finalize):
+   attention factors re-weighted over the ones left on, then the emotional-peaks lift, then the caption lift. */
+(() => {{
+  const why = document.querySelector("section.why");
+  if (!why) return;
+  const tiers = JSON.parse(why.dataset.tiers || "[]");
+  const boxes = [...why.querySelectorAll(".fsw input")];
+  if (!boxes.length) return;
+  const orig = document.getElementById("vpnum").textContent;
+  const tierOf = v => (tiers.find(t => v < t[0]) || [0, ""])[1];
+  const set = (id, txt) => {{ const el = document.getElementById(id); if (el) el.textContent = txt; }};
+  const recompute = () => {{
+    let ws = 0, sum = 0, v, steps = [], terms = [], off = [];
+    boxes.forEach(b => b.closest("tr").classList.toggle("off", !b.checked));
+    boxes.filter(b => b.dataset.kind === "base").forEach(b => {{
+      const label = b.closest("td").textContent.trim();
+      if (b.checked) {{ ws += +b.dataset.weight; sum += +b.dataset.weight * +b.dataset.value;
+        terms.push(+b.dataset.weight + " × " + Math.round(+b.dataset.value) + " <i>" + label.toLowerCase() + "</i>"); }}
+      else off.push(label);
+    }});
+    const base = ws ? sum / ws : 50;  // no attention factor left: a typical reel
+    v = base;
+    steps.push("<li><span>Attention base</span><code>" + (terms.length ? "(" + terms.join(" + ") + ") ÷ " + +ws.toFixed(2)
+      : "no attention factor on: typical reel") + "</code><b>" + base.toFixed(1) + "</b></li>");
+    boxes.filter(b => b.dataset.kind === "lift").forEach(b => {{
+      const label = b.closest("td").textContent.trim();
+      if (!b.checked) {{ off.push(label); return; }}
+      const add = +b.dataset.weight * (+b.dataset.value / 100) * (100 - v);
+      steps.push("<li><span>+ " + label + "</span><code>" + +b.dataset.weight + " × " + Math.round(+b.dataset.value) +
+        "/100 × (100 − " + v.toFixed(1) + ")</code><b>+" + add.toFixed(1) + "</b></li>");
+      v += add;
+    }});
+    const vr = Math.round(v), tag = tierOf(v);
+    set("vpnum", vr); set("vptag", tag); set("tilevp", vr); set("tiletag", tag);
+    steps.push("<li class=res><span>Viral potential</span><code>" + v.toFixed(1) + ", rounded</code><b>" + vr +
+      " <em>" + tag + "</em></b></li>");
+    document.getElementById("vpcalc").innerHTML = steps.join("");
+    const w = document.getElementById("vpwhatif");
+    w.hidden = !off.length;
+    if (off.length) w.textContent = "What-if: without " + off.join(", ") + " the viral potential would be " + vr +
+      " (" + tag + "), instead of " + orig + ". Saved reports are unchanged.";
+  }};
+  boxes.forEach(b => b.addEventListener("change", recompute));
+}})();
 (() => {{
   const v = document.getElementById("reel"), ph = document.getElementById("playhead");
   const T = {len((r.get("series") or {}).get("attention") or []) or 1};

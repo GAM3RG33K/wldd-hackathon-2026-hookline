@@ -39,6 +39,10 @@ WORK = Path("/tmp/hookline_jobs")
 WORK.mkdir(parents=True, exist_ok=True)
 MODEL = None
 GPU_LOCK = threading.Lock()  # held in a worker thread, never on the event loop
+# transformers builds models on the "meta" device through process-wide state, so two threads loading
+# models at once (boot warm-up + an early job) can leave TRIBE's weights on meta ("Cannot copy out of
+# meta tensor"). Every model load in this process goes through this lock.
+LOAD_LOCK = threading.RLock()
 JOBS: dict = {}
 BOOT: dict = {}  # boot import check result, surfaced on /health (run logs are unreliable)
 
@@ -297,11 +301,12 @@ def speech_gate(job_id: str, video) -> dict:
     from transformers import ASTFeatureExtractor, ASTForAudioClassification
     j = JOBS[job_id]
     if "model" not in _AST:
-        t0 = time.time()
-        _AST["fe"] = ASTFeatureExtractor.from_pretrained(AST_REPO)
-        m = ASTForAudioClassification.from_pretrained(AST_REPO, torch_dtype=torch.float32).eval()
-        _AST["model"] = m.to(DEVICE)
-        jlog(job_id, f"  loaded AST AudioSet classifier in {time.time() - t0:.1f}s")
+        with LOAD_LOCK:
+            t0 = time.time()
+            _AST["fe"] = ASTFeatureExtractor.from_pretrained(AST_REPO)
+            m = ASTForAudioClassification.from_pretrained(AST_REPO, torch_dtype=torch.float32).eval()
+            _AST["model"] = m.to(DEVICE)
+            jlog(job_id, f"  loaded AST AudioSet classifier in {time.time() - t0:.1f}s")
     fe, model = _AST["fe"], _AST["model"]
     labels = model.config.label2id
     sr = 16000
@@ -906,7 +911,8 @@ def _warm_emotion():
     try:
         import emotion as EMO
         t0 = time.time()
-        st = EMO.warm(DEVICE)
+        with LOAD_LOCK:
+            st = EMO.warm(DEVICE)
         ok = all(v == "ok" for v in st.values())
         BOOT["emotion_models"] = (f"ready ({time.time() - t0:.0f}s)" if ok else
                                   f"PARTIAL ({time.time() - t0:.0f}s): {st}")
@@ -951,7 +957,10 @@ def load_model():
     t0 = time.time()
     overrides = {f"data.{m}.device": DEVICE for m in
                  ("text_feature", "audio_feature", "video_feature.image", "image_feature.image")}
-    MODEL = TribeModel.from_pretrained("facebook/tribev2", device=DEVICE, config_update=overrides)
+    with LOAD_LOCK:  # waits for boot warm-up to finish loading its models
+        if MODEL is not None:
+            return MODEL
+        MODEL = TribeModel.from_pretrained("facebook/tribev2", device=DEVICE, config_update=overrides)
     for hook in (_install_transcript_hook, _install_speed_hooks, _install_timing_hooks, _install_progress_loops):
         try:
             hook()
@@ -1016,11 +1025,12 @@ def _run_job_sync(job_id: str, video: Path, source_name: str):
                         n = int(np.ceil(len(audio) / 16000)) or int(np.ceil(j["video_s"]))
                         sp = gate.get("speech_per_second") or [0.0] * n
                         segs = j.get("transcript_segments") if j["modalities"].get("text") else []
-                        j["emotion"] = EMO.emotion_cues(video, audio, 16000, sp, segs or [], DEVICE,
-                                                        log=lambda m: jlog(job_id, f"  {m}"),
-                                                        caption=j.get("caption", ""),
-                                                        transcript=" ".join(s["text"] for s in
-                                                                            (j.get("transcript_segments") or [])))
+                        with LOAD_LOCK:  # its channels may still load models lazily
+                            j["emotion"] = EMO.emotion_cues(video, audio, 16000, sp, segs or [], DEVICE,
+                                                            log=lambda m: jlog(job_id, f"  {m}"),
+                                                            caption=j.get("caption", ""),
+                                                            transcript=" ".join(s["text"] for s in
+                                                                                (j.get("transcript_segments") or [])))
                 except JobCancelled:
                     raise
                 except Exception as e:  # noqa: BLE001 - emotion is additive, never fatal
