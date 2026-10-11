@@ -415,3 +415,4 @@
 ## 2026-10-11 — Final deck polish + reports wording
 - Removed the speed slide (internal optimisation). Validation legend: large reel-type colour discs, bigger dots and chips. Models and tools cards carry link chips (top right) to every public model / library actually used.
 - Reports page + report view: "Full analysis" (+ caption matched / ignored), "Quick preview", "N full analyses · M quick previews"; no GPU / TRIBE wording; footer says "Full analysis by the Virality Predictor".
+- /reports lists full analyses only (quick previews stay on disk, reachable by URL); summary "N reels, full analysis".

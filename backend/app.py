@@ -638,6 +638,8 @@ def list_reports(sort: str = "viral"):
         if name is None:
             continue
         full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
+        if not full:  # the list shows full analyses only; quick previews stay on disk, reachable by URL
+            continue
         audio = (r.get("audio") or {}).get("type") or "-"
         song = (r.get("audio") or {}).get("song")
         at = analysed_at(p)
@@ -654,7 +656,6 @@ def list_reports(sort: str = "viral"):
                     f'<td class="num muted">{r.get("duration_s", 0):.0f} s</td>'
                     f'<td class="num muted mono">{_time.strftime("%b %d %H:%M", _time.localtime(at))}</td></tr>'))
     key = {"viral": lambda x: (-x[0], -x[1]), "latest": lambda x: -x[1], "oldest": lambda x: x[1]}[sort]
-    n_full = sum(1 for x in rows if x[2])
     rows = [x[3] for x in sorted(rows, key=key)]
     options = "".join(f'<option value={k}{" selected" if k == sort else ""}>{label}</option>' for k, label in REPORT_SORTS.items())
     empty = '<tr><td colspan=7 class=empty>No reports yet. Analyze a reel in the TUI (Enter or a) and it appears here.</td></tr>'
@@ -689,7 +690,7 @@ td.reel .sub{{display:block;font-size:.8rem;color:var(--muted)}}
 </style></head><body><div class=wrapper>
 <div class=bar><span class=brand><i></i>Hookline</span><nav class=nav><a href="/pitch">Pitch deck</a><a href="/">Upload a video</a></nav></div>
 <h1>Reports</h1>
-<div class=summary><span><b>{len(rows)}</b> reels</span><span><b>{n_full}</b> full analyses</span><span><b>{len(rows) - n_full}</b> quick previews</span><span>refreshes every 5 s</span>
+<div class=summary><span><b>{len(rows)}</b> reels, full analysis</span><span>refreshes every 5 s</span>
 <label class=sort for=sort>Sort <select id=sort onchange="location.search='?sort='+this.value">{options}</select></label></div>
 <div class=panel><table><thead><tr><th>Reel</th><th>Viral potential</th><th class=num>Hook</th><th class=num>Hold</th><th class=num>Finish</th>
 <th>Audio</th><th class=num>Length</th><th class=num>Analysed</th></tr></thead><tbody>{''.join(rows) or empty}</tbody></table></div>
