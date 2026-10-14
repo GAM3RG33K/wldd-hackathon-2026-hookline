@@ -2,7 +2,10 @@
 tribe/virality_weights.json. Read at call time, so a change applies without restarting anything.
 
   hook, drop_free, strong_moments, ending   attention factors: must add up to exactly 1
-  emotion_lift                              share of the gap to 100 that strength 100/100 closes
+  emotion_lift                              0 by default: emotion is report insight, not a score
+                                             input (2026-10-14 ablation cut outlier-vs-low separation
+                                             from +0.54 to +0.30, `.ai/research/scoring-heuristic.md`).
+                                             A non-zero value turns the lift + breakdown row back on.
   caption                                   share of the gap to 100 that a fully relevant caption closes
 Uncalibrated: set by hand until fitted on real view counts (tribe/fit_virality.py).
 """
@@ -10,7 +13,7 @@ import json
 from pathlib import Path
 
 FILE = Path(__file__).with_name("virality_weights.json")
-DEFAULTS = {"hook": 0.40, "drop_free": 0.25, "strong_moments": 0.20, "ending": 0.15, "emotion_lift": 0.50, "caption": 0.15}
+DEFAULTS = {"hook": 0.40, "drop_free": 0.25, "strong_moments": 0.20, "ending": 0.15, "emotion_lift": 0.0, "caption": 0.15}
 BASE_KEYS = ("hook", "drop_free", "strong_moments", "ending")
 LIMITS = (0.0, 1.0)
 

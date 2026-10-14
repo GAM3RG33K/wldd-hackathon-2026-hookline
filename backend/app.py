@@ -435,7 +435,9 @@ def _emotion_html(r: dict) -> str:
 {strong_line}
 <p><b>Emotion</b> (predicted, evoked for an average viewer): {html.escape(dom)} ·
 sequence {html.escape(" → ".join(sm.get("sequence", [])) or "-")} · arc {html.escape(sm.get("arc", "-"))} ·
-high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)}</p>
+high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)} ·
+<span class=muted>insight only, not a viral-potential input (2026-10-14 ablation: the lift cut
+outlier-vs-low separation, `.ai/research/scoring-heuristic.md`)</span></p>
 <p class=muted>channels: {", ".join(em.get("channels", []))}{f" · brain salience agreement r={br:+.2f}" if br is not None else ""}
 · {html.escape(em.get("note", ""))}</p><figcaption>{legend}</figcaption></div>"""
 
@@ -1016,7 +1018,8 @@ Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored 
   document.getElementById("wreset").addEventListener("click", () => send({{reset: true}}));
 }})();
 /* What-if: switch factors in or out of the final rating. Same formula as the server (hookline_report.finalize):
-   attention factors re-weighted over the ones left on, then the emotional-peaks lift, then the caption lift. */
+   attention factors re-weighted over the ones left on, then the caption lift. The emotional-peaks lift
+   is 0 by default (emotion is insight, not a score input) and returns only if its weight is set > 0. */
 (() => {{
   const why = document.querySelector("section.why");
   if (!why) return;

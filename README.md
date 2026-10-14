@@ -33,6 +33,7 @@ Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heurist
 - **Viral potential** with a tag (Low reach → Viral potential) and a **"Why viral potential N"** breakdown: each factor's pull vs a typical reel, biggest boost and biggest drag.
 - **Explore the score** on any report: switch each factor in or out to see a what-if score, read the step-by-step calculation, and **edit the weights** (attention weights must add up to 1; lifts 0-1). New weights apply to every report at once, no re-analysis. `/reports` has an **Ignore captions** switch to compare scores without captions.
 - **Emotion**: 20 emotions predicted from scenes, faces, music, voice, words and sounds; strong peaks (amusement, awe, outrage, sorrow, being moved, fear, disgust, empathic pain); audible laughter counted separately; emotion dots on the chart follow the video playhead.
+- Emotions are **insight, not a score input**: they appear on the report (chart dots, arc, strong peaks) and lift nothing by default — the 2026-10-14 ablation showed an emotion lift lowered the score's own outlier-vs-low separation (`.ai/research/scoring-heuristic.md`).
 - **Caption check**: a caption counts only if it describes this video (frames and speech); filler or borrowed captions are ignored. A relevant caption adds context and lifts viral potential, shown in its own report section.
 
 **Improve**

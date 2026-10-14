@@ -3,6 +3,6 @@
  "drop_free": 0.25,
  "strong_moments": 0.3,
  "ending": 0.15,
- "emotion_lift": 0.4,
+ "emotion_lift": 0.0,
  "caption": 0.25
 }

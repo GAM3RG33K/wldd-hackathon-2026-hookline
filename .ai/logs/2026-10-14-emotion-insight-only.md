@@ -1,0 +1,22 @@
+# 2026-10-14 — Option A applied: emotion is insight, not a score input
+
+- **Goal:** Implement option A from the ablation (`.ai/logs/2026-10-14-virality-ablation.md`): zero the `emotion_lift`, remove the lift row and method suffix, relabel emotion as insight on every surface, re-score all reports, run the AGENTS.md verification loop.
+- **Commands (workdir = repo root, venv = `/private/var/folders/z0/1lmh900j49sddwj4x46x55g40000gn/T/opencode/rescore_env`):**
+  - Edit: `tribe/weights.py` + `hf_space/weights.py` (`DEFAULTS["emotion_lift"] = 0.0`), `tribe/virality_weights.json` (`"emotion_lift": 0.0`, other five weights untouched), `tribe/hookline_report.py` (`EMO_LIFT` removed; `finalize()` lift and `apply_weights()` breakdown row now conditional on `w_emo > 0`; regex strips a stale "+ strong-emotion lift" suffix; docstring updated), `hf_space/hookline_report.py` re-synced by `cp`.
+  - Label: `backend/app.py` `_emotion_html` insight-only note; `tui.py` `#moments` line; what-if JS comment.
+  - Docs: `.ai/rules/01-business-logic.md` item 9, `ARCHITECTURE.md` §8, `README.md` Emotion bullet, `.ai/research/scoring-heuristic.md` ablation section.
+  - `uvx pyflakes tui.py backend/app.py tribe/*.py hf_space/*.py` → no undefined names (6 pre-existing warnings identical to HEAD).
+  - `cmp tribe/hookline_report.py hf_space/hookline_report.py && cmp tribe/weights.py hf_space/weights.py` → clean.
+  - `$VENV/bin/python tribe/rescore.py` → 90/96 re-scored (6 fail on missing local video, pre-existing).
+  - Backend restart on :8010 → `curl /report/<id>/view`, `POST /weights`.
+  - Headless Textual: `$VENV/bin/python /tmp/tui_test2.py` — boots `tui.Hookline`, calls `show_report` on `backend/out/s-0566437e/report.json`, reads `#moments`.
+- **Result:** pass. Artifacts: all 107 `backend/out/*/report.json`; backups of the pre-change state at `/private/var/folders/z0/1lmh900j49sddwj4x46x55g40000gn/T/opencode/{out_before_emotion_change,out_liftON,out_liftOFF}`.
+- **Verdict (evidence):**
+  - Ablation before/after on identical code with the lift toggled 0.4 ↔ 0.0: 0 diffs in any non-virality field; 32 reels lose the lift row. d outliers-vs-low: **+0.24 (lift ON) → +0.42 (lift OFF)** — separation improves, as the ablation predicted.
+  - Rendered surfaces: report page has the insight note, 0 factor rows with `kind=lift`, weights panel shows `Emotional peaks … default 0`, and **0 of 40 sampled reports** still carry "strong-emotion" in the method string. TUI moments pane reads `emotional strength 64/100 · insight only (not a score input)`.
+  - Reverse test: `POST /weights {"weights":{"emotion_lift":0.5}}` re-enables the row and re-applies to 95 reports; `{"reset":true}` returns to defaults — the lift is dead by default, not deleted.
+  - 12 dirs without `virality_breakdown` rows (incl. `demo`, `s-21494dcc`) are the **identical set before and after** the change — pre-existing Colab-era staleness, not caused here. 5 video-less reports repaired in place via `HL.apply_weights` + `write_md`.
+  - Internal consistency sweep: every report's `points + caption == virality`; `virality == virality_base` wherever caption ≤ 0; md numbers match json.
+  - Leakage grep on all changed files: only display context + explicit "never a scoring input" disclaimers.
+- **Caveats:** 6 of 96 reports can't be re-scored without their source videos (missing locally); they were repaired in place and are marked stale. System `python3` is unusable for scorer runs (numpy arch mismatch) — use the temp venv. Weights file must stay `hook 0.3 / drop_free 0.25 / strong_moments 0.3 / ending 0.15 / emotion_lift 0.0 / caption 0.25` (only `emotion_lift` changed from the committed 0.4).
+- **Next:** commit (nothing committed yet). Then the MVP pivot decision — see `.ai/research/winner-teardown.md` P1–P5 reframed for an agency buyer (validation evidence, batch ops, client deliverable) before any further implementation.

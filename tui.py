@@ -1016,6 +1016,7 @@ class Hookline(App):
                 moments.append("\nstrong emotions: ", "dim")
                 moments.append(f"{parts} · {st.get('share', 0):.0%} of the reel · emotional strength "
                                f"{st.get('score', 0):.0f}/100", "bold")
+                moments.append(" · insight only (not a score input)", "dim")
                 if st.get("audible_laughter_s") is not None:
                     moments.append(f" · audible laughter {st['audible_laughter_s']}s", "dim")
         self.query_one("#moments", Static).update(moments)

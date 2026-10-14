@@ -123,9 +123,6 @@ def peak_features(attention):
             "peak_gap_cv": round(float(gaps.std() / gaps.mean()), 3) if len(gaps) and gaps.mean() else 1.0}
 
 
-EMO_LIFT = 0.5  # emotional strength 100 closes half the gap to 100 (no penalty without strong peaks yet)
-
-
 def virality_tag(score):
     return next(name for cut, name in VIRALITY_TIERS if score < cut)
 
@@ -511,20 +508,26 @@ def finalize(report, extra):
         strength = block["strong"]["score"]
         sc = report["scores"]
         sc["emotional_strength"] = strength
-        if not VIRALITY_MODEL:  # interim: strong emotional peaks lift viral potential toward 100
+        if not VIRALITY_MODEL:
+            # Emotion is report insight, not a score input: the 2026-10-14 ablation showed the lift
+            # cutting outlier-vs-low separation (+0.54 -> +0.30) and firing on 26 of 28 non-outlier
+            # reels (.ai/research/scoring-heuristic.md). The default weight is 0, so nothing changes
+            # unless a fit earns the lift back; a non-zero weight re-enables lift + breakdown row.
             base = sc["virality"]
-            v = base + WT.load()["emotion_lift"] * (strength / 100.0) * (100 - base)
+            w_emo = WT.load()["emotion_lift"]
+            lift = w_emo * (strength / 100.0) * (100 - base)
+            v = base + lift
             sc.update(virality_base=base, virality=round(v, 1), virality_band=band(v), virality_tag=virality_tag(v),
-                      virality_method=sc.get("virality_method", "") + f"; + strong-emotion lift ({strength:.0f}/100)")
-            if strength > 0:
+                      virality_method=sc.get("virality_method", "")
+                      + (f"; + strong-emotion lift ({strength:.0f}/100)" if lift > 0 else ""))
+            if strength > 0 and lift > 0:
                 st = block["strong"]
                 kinds = ", ".join(e for e, d in (st.get("durations_s") or {}).items() if d) or "strong emotion"
-                lift = round(v - base, 1)
                 sc.setdefault("virality_breakdown", []).append({
                     "key": "emotion_lift", "label": "Emotional peaks", "value": round(float(strength), 1),
-                    "weight": EMO_LIFT, "points": lift, "vs_typical": lift,
+                    "weight": w_emo, "points": round(lift, 1), "vs_typical": round(lift, 1),
                     "explain": f"{kinds} peaks cover {st.get('share', 0):.0%} of the reel; strength {strength:.0f}/100 "
-                               f"closes {EMO_LIFT * strength / 100:.0%} of the gap to 100"})
+                               f"closes {w_emo * strength / 100:.0%} of the gap to 100"})
     cap = CAP.assess(extra)
     if cap:  # optional creator caption: ignored unless it describes this reel
         report["caption"] = cap
@@ -553,7 +556,8 @@ def finalize(report, extra):
 
 def apply_weights(report, W=None):
     """Recompute viral potential from the factor values stored in the report with the current (or given)
-    weights: attention factors as a weighted average, then the emotional-peaks lift, then the caption lift.
+    weights: attention factors as a weighted average, then the emotional-peaks lift (0 by default, so
+    the row disappears), then the caption lift.
     Instant (no re-analysis); updates scores, the breakdown, the summary and caption points in place."""
     if VIRALITY_MODEL:
         return report
@@ -570,16 +574,18 @@ def apply_weights(report, W=None):
     base = sum(W[x["key"]] * x["value"] for x in base_rows) / ws
     rows, v = base_rows, base
     strength = float(sc.get("emotional_strength") or 0.0)
+    emo_add = 0.0
     if strength > 0:
-        prev = next((x for x in old if x.get("key") == "emotion_lift"), {})
-        add = W["emotion_lift"] * strength / 100.0 * (100 - v)
-        st = ((report.get("emotion") or {}).get("strong") or {})
-        kinds = ", ".join(e for e, d in (st.get("durations_s") or {}).items() if d) or "strong emotion"
-        rows.append({**prev, "key": "emotion_lift", "label": "Emotional peaks", "value": round(strength, 1),
-                     "weight": W["emotion_lift"], "points": round(add, 1), "vs_typical": round(add, 1),
-                     "explain": f"{kinds} peaks cover {st.get('share', 0):.0%} of the reel; strength {strength:.0f}/100 "
-                                f"closes {W['emotion_lift'] * strength / 100:.0%} of the gap to 100"})
-        v += add
+        emo_add = W["emotion_lift"] * strength / 100.0 * (100 - v)
+        if emo_add > 0:  # insight only at the default weight: no row, no points, no method suffix
+            prev = next((x for x in old if x.get("key") == "emotion_lift"), {})
+            st = ((report.get("emotion") or {}).get("strong") or {})
+            kinds = ", ".join(e for e, d in (st.get("durations_s") or {}).items() if d) or "strong emotion"
+            rows.append({**prev, "key": "emotion_lift", "label": "Emotional peaks", "value": round(strength, 1),
+                         "weight": W["emotion_lift"], "points": round(emo_add, 1), "vs_typical": round(emo_add, 1),
+                         "explain": f"{kinds} peaks cover {st.get('share', 0):.0%} of the reel; strength {strength:.0f}/100 "
+                                    f"closes {W['emotion_lift'] * strength / 100:.0%} of the gap to 100"})
+            v += emo_add
     cap = report.get("caption")
     if cap:
         rel = float(cap.get("relevance") or 0.0)
@@ -592,8 +598,12 @@ def apply_weights(report, W=None):
                          "weight": W["caption"], "points": round(add, 1), "vs_typical": round(add, 1),
                          "explain": f"{how}; relevance {rel:.2f} closes {W['caption'] * rel:.0%} of the gap to 100"})
             v += add
+    # a stale "+ strong-emotion lift" suffix from an older run must not survive a weight change
+    method = re.sub(r"; \+ strong-emotion lift \([^)]*\)", "", sc.get("virality_method", ""))
+    if emo_add > 0:
+        method += f"; + strong-emotion lift ({strength:.0f}/100)"
     sc.update(virality=round(v, 1), virality_base=round(base, 1), virality_band=band(v), virality_tag=virality_tag(v),
-              virality_breakdown=rows, weights=W)
+              virality_method=method, virality_breakdown=rows, weights=W)
     sc["virality_summary"] = virality_summary(sc)
     return report
 
