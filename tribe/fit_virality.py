@@ -7,10 +7,16 @@ Account data (handle, follower band, views) is used ONLY to pick the label group
 a feature: the model judges the video.
 
 Small n, so: univariate effect sizes first, then an L2 logistic regression on the strongest
-few features, with leave-one-out accuracy as an honesty check.
+few features, with leave-one-out accuracy as an honesty check. Feature selection runs INSIDE
+each fold — selecting top-k on the full set first and then cross-validating leaks the held-out
+reel into the selection and inflates the number.
 
   python tribe/fit_virality.py            # fit, write tribe/virality_model.json, re-score reports
   python tribe/fit_virality.py --dry-run  # print the fit only
+
+Before fitting at all, run `python tribe/validate_virality.py`: it reports AUC + permutation
+p + a per-channel ablation on held-out folds. The model is only written when that run shows
+the fit beating the shipped heuristic on held-out data.
 """
 import argparse
 import csv
@@ -80,7 +86,8 @@ def main():
     feats = [k for k in CANDIDATES if all(r["f"].get(k) is not None for r in rows)]
     X = np.array([[float(r["f"][k]) for k in feats] for r in rows])
 
-    # effect sizes (Cohen's d): how far apart the two groups sit on each feature
+    # effect sizes (Cohen's d): how far apart the two groups sit on each feature.
+    # Reported on the FULL set — descriptive only. It must NOT feed the CV loop below.
     d = {}
     for i, k in enumerate(feats):
         a1, a0 = X[y == 1, i], X[y == 0, i]
@@ -91,21 +98,45 @@ def main():
         i = feats.index(k)
         print(f"  {k:16s} {X[y == 1, i].mean():11.4f} {X[y == 0, i].mean():10.4f} {d[k]:+9.2f}")
 
+    # leave-one-out with feature selection INSIDE each fold. Selecting top-k on the full
+    # set first and then cross-validating leaks the held-out reel into the selection and
+    # inflates accuracy (that bug reported 65% on 20 reels; in-fold selection does not).
+    hits = []
+    for i in range(len(y)):
+        m = np.ones(len(y), bool)
+        m[i] = False
+        d_fold = {}
+        for j, k in enumerate(feats):
+            a1, a0 = X[m][y[m] == 1, j], X[m][y[m] == 0, j]
+            if len(a1) < 2 or len(a0) < 2:
+                d_fold[k] = 0.0
+                continue
+            sp = np.sqrt((a1.var(ddof=1) + a0.var(ddof=1)) / 2) or 1e-9
+            d_fold[k] = abs(float((a1.mean() - a0.mean()) / sp))
+        keep = sorted(d_fold, key=lambda k: -d_fold[k])[:a.k]
+        idx = [feats.index(k) for k in keep]
+        mu, sd = X[m][:, idx].mean(0), X[m][:, idx].std(0) + 1e-9
+        Z = (X[:, idx] - mu) / sd          # held-out row scored on the fold's own mu/sd
+        w, b = logreg(Z[m], y[m], a.lam)
+        hits.append(int((Z[i] @ w + b > 0) == bool(y[i])))
+    loo = float(np.mean(hits))
+    base = float(max(y.sum(), len(y) - y.sum()) / len(y))
+    print(f"\nleave-one-out accuracy (selection inside each fold): {loo:.0%}")
+    print(f"trivial baseline (always guess the bigger group):    {base:.0%}")
+    if loo <= base:
+        print(f"=> the model does NOT beat the baseline. Accuracy is the wrong metric here "
+              f"({int(len(y) - y.sum())} of {len(y)} reels are low-view); use "
+              f"tribe/validate_virality.py, which reports AUC + a permutation test.")
+    print("With 10 outliers every number has wide error bars — validate_virality.py is "
+          "the one to quote.")
+
+    # final fit on everything, for use only once held-out reels exist to test on
     keep = sorted(d, key=lambda k: -abs(d[k]))[:a.k]
     idx = [feats.index(k) for k in keep]
     mu, sd = X[:, idx].mean(0), X[:, idx].std(0) + 1e-9
     Z = (X[:, idx] - mu) / sd
-
-    # leave-one-out: would the model have called each reel right without seeing it?
-    hits = []
-    for i in range(len(y)):
-        m = np.ones(len(y), bool); m[i] = False
-        w, b = logreg(Z[m], y[m], a.lam)
-        hits.append(int((Z[i] @ w + b > 0) == bool(y[i])))
-    loo = float(np.mean(hits))
     w, b = logreg(Z, y, a.lam)
     print(f"\nkept features: {keep}\nweights: {dict(zip(keep, np.round(w, 3)))}  bias {b:.3f}")
-    print(f"leave-one-out accuracy: {loo:.0%} (chance = 50%)")
 
     model = {"label": f"first-pass fit: {int(y.sum())} viral outliers vs {int(len(y) - y.sum())} low-view reels, "
                       f"leave-one-out {loo:.0%}; not yet validated on held-out reels",

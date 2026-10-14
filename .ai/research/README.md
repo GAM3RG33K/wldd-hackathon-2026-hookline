@@ -3,6 +3,7 @@
 - `tribe-v2-model.md` — what TRIBE v2 is, encoders, prediction shape, atlas fallback.
 - `scoring-heuristic.md` — attention / hook / hold / virality formulas, calibration status, fit plan vs view counts.
 - `emotion.md` — emotion channels, what each can and cannot see, failure cases found on real reels and their fixes.
+- `validation.md` — does the score predict outcomes? AUC + permutation p + per-channel ablation on 81 labelled reels, the leakage found in `fit_virality.py`, and what would settle it (more outliers, or within-account pairs).
 - `hf-space.md` — GPU Space decisions: hardware, speed, model pins, deploy loop.
 - `colab-bridge.md` — RETIRED 2026-10-10 (kept for reference).
 - `winner-teardown.md` — teardown of `wlddhq/mindMatrix` (hackathon winner) and `wlddhq/hooklinewldd-ttcc` (special mention) from `.local/`: what each won with, capability gap table vs Hookline 2026, and the cherry-pick list (P1–P5 now, L1–L4 later, plus do-NOT-copy).

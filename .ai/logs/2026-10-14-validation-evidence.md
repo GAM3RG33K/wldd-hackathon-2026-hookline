@@ -1,0 +1,24 @@
+# 2026-10-14 — Validation evidence: does the score predict outcomes?
+
+- **Goal:** Answer the agency's first question ("how do you know it works?") with held-out numbers, not in-sample claims. MVP priority #1.
+- **Commands (workdir = repo root, venv = `/private/var/folders/z0/1lmh900j49sddwj4x46x55g40000gn/T/opencode/rescore_env`):**
+  - Inventory: `python3` one-offs over `samples/{face,faceless,outliers}/metadata.csv` + `backend/out/s-*/report.json` (feature completeness, `views` coverage).
+  - New: `$VENV/bin/python tribe/validate_virality.py --json /tmp/validate.json` (AUC, bootstrap CI, permutation p, per-channel ablation on shared folds).
+  - One-off probes (in /tmp): bootstrap CI on heuristic AUC; top-10/15/20 extremes permutation; within-stratum per-channel Spearman; per-feature Cohen's d; re-weighting sweep hook/drop/strong/ending; within-account pairwise; power calculation.
+  - Edit: `tribe/fit_virality.py` (selection moved inside each fold; prints trivial baseline).
+  - Docs: new `.ai/research/validation.md`; corrected the leaked-65% references in `.ai/research/scoring-heuristic.md`, `.ai/research/winner-teardown.md` L1, `.ai/rules/01-business-logic.md` item 9; indexed in `.ai/research/README.md`.
+  - `uvx pyflakes tribe/validate_virality.py tribe/fit_virality.py` → clean.
+- **Result:** pass. Findings in `.ai/research/validation.md`; raw JSON `/tmp/validate.json`.
+- **Verdict (evidence):**
+  - 81 labelled full-TRIBE reels with views: 10 outliers (10M–315M) vs 71 low-view (2.3k–4.9M); 29 face / 42 faceless.
+  - Shipped heuristic: **AUC +0.615, bootstrap 95% CI [+0.434, +0.801], permutation p=0.135** — CI includes 0.5, so **not distinguishable from chance** at this n. Spearman vs log10(views) +0.178.
+  - Refit (selection + standardisation inside each fold, 5-fold × 30): held-out AUC +0.674 (p=0.080) but Spearman **−0.118**, worse than the heuristic. `virality_model.json` stays unwritten.
+  - Per-channel ablation on shared folds: attention removal *raises* AUC +0.081 (helps 1/30 folds); music +0.016; ffmpeg +0.006; **emotion and ASR deltas exactly 0 — no emotion feature is ever selected** (independent confirmation of the emotion-insight-only change).
+  - Feature d (descriptive, ~23 features tested): `peaks` +0.95, `peaks_per_window` +0.87, `hook` +0.63, `volatility` −0.66, `peak_gap_cv` −0.61, `drop_share` +0.24 (so drop-free points backwards), `peak_share` −0.20, `ending` −0.11.
+  - Shipped weighting spends 40% on drop-free + ending (backwards) and uses `peak_share` where `peaks` is the strong feature. Re-weighting to hook+peaks: AUC 0.623→0.661, top-10-vs-bottom-10 gap +6.8→+13.1 — **but bootstrap CI [−0.079,+0.114], wins 65% of resamples. Not significant → no weights changed.**
+  - Extremes: top-10 vs bottom-10 gap +6.8 pts p=0.061; decays at top-15 (p=0.299) / top-20 (p=0.153).
+  - Within-account pairwise (agency's actual question): only 6 accounts with 2+ reels, **4/4 correct, p=0.062** — most promising framing, needs ~30 accounts.
+  - Power (α=.05, ~80%, 71 low-view held): detect AUC 0.70 → ~10 outliers (have 10); 0.65 → ~19; 0.60 → ~58.
+  - **Leakage found and fixed:** old `fit_virality.py` selected top-k on the full set *then* LOO'd — the reported 65% was inflated. In-fold selection gives 86%, *below* the 88% trivial baseline (71/81 low-view). Accuracy was never the right metric; script now prints the baseline and says so.
+- **Caveats:** label noise — 71 "low-view" reels include some up to 4.9M views; per-feature d values are uncorrected for ~23 comparisons; all numbers rest on 10 outliers.
+- **Next:** nothing applied — no weight change, no model written. To settle it: ~10 more labelled outliers, or ~30 accounts × 2 reels for the within-account pairwise test (the framing that sells). Then decide #3 (client-facing export) or #4 (cost per reel).
