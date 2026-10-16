@@ -1,1097 +1,253 @@
-#!/usr/bin/env python
-"""Hookline prototype backend (FastAPI front door, Colab = GPU backend).
+"""Phoenix v2 backend — TTCC retention analysis, local on this machine.
 
-Demo in 15 mins:
-  uvicorn backend.app:app --port 8000
-  open http://localhost:8000  -> upload a reel -> get report in seconds.
+Endpoints:
+  GET  /health                 – liveness + model env status
+  POST /api/analyze            – upload a video (+caption); returns a job id
+  GET  /api/report/{rid}       – job status while running, report when done
+  GET  /api/reports            – list finished reports
 
-Pipeline per job (PREVIEW mode): upload -> probe duration -> synthetic
-preview preds sized to duration -> hookline_report.analyse() on REAL video
-signals (cuts/motion/audio) -> report.json/md/png. Schema matches
-tribe/hookline_report.py. Full TRIBE neural preds come from
-tribe/tribe_colab.ipynb (T4); drop them into backend/out/<job>/ to upgrade
-a job from preview to full (see POST /jobs/colab).
+Real TTCC inference runs in a background thread (checkpoint load takes a
+couple of minutes on MPS). When the model environment is unavailable the
+job falls back to a demo curve and is clearly marked `demo: true`.
+Scores are heuristic, within-video normalised, uncalibrated.
 """
-import hashlib
+from __future__ import annotations
+
 import json
 import math
 import shutil
-import sys
+import threading
+import time
+import traceback
 import uuid
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 
-HERE = Path(__file__).parent.resolve()
-ROOT = HERE.parent
-TRIBE = ROOT / "tribe"
-sys.path.insert(0, str(TRIBE))
-import hookline_report as HL  # noqa: E402
-from backend import theme as T  # noqa: E402
+from phoenix import ttcc
+from phoenix.scorer import analyse
 
-OUT = HERE / "out"
-OUT.mkdir(exist_ok=True)
-DEMO_SRC = TRIBE / "out" / "demo_sneaker" / "report.json"
+ROOT = Path(__file__).resolve().parent.parent
+JOBS_DIR = ROOT / "backend" / "out"
+SAMPLES_DIR = ROOT / "samples_v2"
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-NEURAL_SOURCE = "synthetic-preview"
-METHOD_NOTE = "heuristic, within-video normalised, uncalibrated"
+STAGES = [
+    "Uploading video and caption",
+    "Processing the video",
+    "Analysing video content",
+    "Analysing audio",
+    "Matching script and caption to the video",
+    "Building the retention graph",
+    "Extracting emotional peaks",
+    "Scoring against viral formulas",
+]
 
-app = FastAPI(title="Hookline prototype")
+app = FastAPI(title="Project Phoenix API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# model-load lock: TTCC loads the checkpoint per run; don't stack runs
+INFER_LOCK = threading.Lock()
 
 
-def preview_preds(T: int, seed: str):
-    import numpy as np
+def _demo_curve(T: int, seed: float) -> list[float]:
+    """A plausible-feeling retention curve for demo mode (no model run)."""
+    rng = np.random.default_rng(int(seed * 1000) % 2**32)
+    t = np.arange(T)
+    base = 88 * np.exp(-0.035 * t) + 12
+    wobble = np.sin(t / 3.0 + seed) * 3
+    boosts = np.zeros(T)
+    slots = list(range(max(T - 2, 1)))
+    for k in rng.choice(slots, size=min(3, len(slots)), replace=False):
+        boosts[k:k + 3] += rng.uniform(4, 9)
+    curve = np.clip(base + wobble + boosts + rng.normal(0, 1.2, T), 4, 100)
+    return [round(float(x) / 100, 3) for x in curve]
 
-    rng = np.random.default_rng(int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16))
-    V = 20484
-    preds = rng.normal(0, 1, (T, V)).astype(np.float64)
-    if T >= 3:
-        preds[1:3] += 2.0
-    mid = T // 2
-    preds[max(mid - 1, 0):min(mid + 2, T)] += 2.5
-    dip = T // 3
-    preds[max(dip - 1, 0):min(dip + 1, T)] -= 2.0
-    return preds
+
+def _probe_duration(path: Path) -> float:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=15)
+        return float(r.stdout.strip())
+    except Exception:
+        return 28.0
 
 
-def run_preview(job: Path, video: Path, source_name: str) -> dict:
-    import numpy as np
-
-    dur = HL.probe_duration(video)
-    T = max(int(math.ceil(dur)), 1)
-    preds = preview_preds(T, job.name)
-    np.save(job / "preds.npy", preds)
-    np.save(job / "times.npy", np.arange(T, dtype=float))
-    (job / "meta.json").write_text(json.dumps({
-        "video": str(video), "source": source_name,
-        "transcript": None, "n_steps": T, "seconds_total": round(dur, 1),
+def _write_status(job_dir: Path, status: str, detail: str = "", progress: int = 0,
+                  stage_index: int = 0) -> None:
+    (job_dir / "status.json").write_text(json.dumps({
+        "status": status, "detail": detail, "progress": progress,
+        "stage_index": stage_index, "stage_total": len(STAGES),
+        "updated": time.time(),
     }))
-    report, d = HL.analyse(job, video)
-    report["preview"] = True
-    report["neural_source"] = NEURAL_SOURCE
-    import suggest as SG
-    report["suggestions"] = SG.suggest(report)
-    report["source_id"] = Path(source_name).stem  # list reports by the uploaded file's name
-    report["local_video"] = str(video.resolve())
-    (job / "report.json").write_text(json.dumps(report, indent=1))
-    HL.write_md(report, job / "report.md")
-    HL.write_png(report, d, job / "report.png")
-    return report
 
 
-INDEX = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Hookline — pre-post attention preview</title>
-<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem}
-.card{border:1px solid #ddd;border-radius:12px;padding:1rem;margin:1rem 0}.muted{color:#666;font-size:.9em}
-button{background:#111;color:#fff;border:0;border-radius:8px;padding:.6rem 1.2rem;cursor:pointer}</style>
-<h1>Hookline prototype</h1>
-<p>Upload a reel → attention preview in seconds. PREVIEW mode: real video/audio signals, synthetic-preview brain stand-in. A full analysis upgrades the same report.</p>
-<div class=card><h3>1. Try instant demo</h3><p><a href="/demo"><button>Open sneaker demo report</button></a>
-<a href="/reports"><button>All reports (live)</button></a></p>
-<p class=muted>Precomputed 28s 9:16 reel: hook 61.4, drops 0:09–0:13 + 0:26–0:29.</p></div>
-<div class=card><h3>2. Upload your reel</h3>
-<form id=f><input type=file name=video accept="video/*" required> <button>Analyze</button></form>
-<pre id=o class=muted></pre>
-<script>f.onsubmit=async e=>{e.preventDefault();o.textContent='uploading…';
-const r=await fetch('/analyze',{method:'POST',body:new FormData(f)});const j=await r.json();
-o.textContent=JSON.stringify(j,null,1);if(j.job_id)location.href='/report/'+j.job_id+'/view';}</script></div>
-<div class=card><h3>3. Full neural (Colab T4)</h3>
-<p class=muted>Run <code>tribe/tribe_colab.ipynb</code> on your video, drop <code>preds.npy/times.npy/meta.json</code> into <code>backend/out/&lt;job&gt;/</code>, then re-open the report. Schema identical.</p></div>
-"""
+def _run_job(rid: str, video: Path, caption: str, duration: float) -> None:
+    """Background worker: run the analysis, publish user-facing progress per step."""
+    job_dir = JOBS_DIR / rid
+    t0 = time.time()
 
+    def say(progress: int, detail: str, stage_index: int) -> None:
+        _write_status(job_dir, "running", detail, progress, stage_index)
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    return INDEX
+    say(2, "Reading your video…", 0)
+    demo = False
+    curve = None
+    source = "demo"
+    try:
+        ok, why = ttcc.environment_ready()
+        if not ok:
+            demo = True
+        else:
+            # user-facing heartbeat while the analysis runs (one long step)
+            done_evt = threading.Event()
+            expected = 75.0 + 2.0 * max(duration, 8)  # generous seconds estimate
+            def heartbeat() -> None:
+                while not done_evt.wait(10):
+                    el = time.time() - t0
+                    pct = min(88, 6 + int(82 * el / expected))
+                    detail = ("Analysing your reel second by second…"
+                              if el < 90 else f"Still analysing… {int(el)}s elapsed")
+                    # advance through the analysis stages with progress
+                    stage = 2 + min(4, int((pct - 6) / 82 * 5))
+                    say(pct, detail, stage)
+            hb = threading.Thread(target=heartbeat, daemon=True)
+            hb.start()
+            try:
+                with INFER_LOCK:
+                    curve = ttcc.run_inference(video, job_dir, rid, duration)
+                source = "ttcc-local"
+            except Exception:
+                traceback.print_exc()
+                demo = True
+            finally:
+                done_evt.set()
+                hb.join()
+    except Exception:
+        traceback.print_exc()
+        demo = True
+
+    if curve is None:
+        curve = _demo_curve(max(int(math.ceil(duration)), 1), time.time() % 97)
+
+    say(93, "Scoring the watch-through…", 7)
+    try:
+        report = analyse(curve, duration, video=str(video), caption=caption, demo=demo)
+    except Exception:
+        traceback.print_exc()
+        _write_status(job_dir, "failed", "Something went wrong while scoring. Please try again.", 100, 7)
+        return
+    report["stages"] = STAGES
+    report["source"] = source
+    report["job_id"] = rid
+    (job_dir / "report.json").write_text(json.dumps(report, indent=1))
+    _write_status(job_dir, "done", "", 100, len(STAGES) - 1)
 
 
 @app.get("/health")
 def health():
-    import os
-    try:
-        from backend.hf_client import SPACE_ID
-    except ImportError:
-        from hf_client import SPACE_ID
-    return {"ok": True, "neural_source": NEURAL_SOURCE,
-            "method": METHOD_NOTE, "colab": "tribe/tribe_colab.ipynb (retired, see hf_space/)",
-            "hf_space": SPACE_ID, "hf_configured": bool(os.environ.get("HF_TOKEN")),
-            "demo_ready": DEMO_SRC.exists()}
-
-
-@app.get("/demo")
-def demo():
-    if not DEMO_SRC.exists():
-        return JSONResponse({"error": "demo not built yet"}, status_code=404)
-    r = json.loads(DEMO_SRC.read_text())
-    r["preview"] = True
-    r["neural_source"] = NEURAL_SOURCE
-    return r
-
-
-@app.post("/analyze")
-async def analyze(video: UploadFile = File(...), mode: str = "preview"):
-    job_id = uuid.uuid4().hex[:8]
-    job = OUT / job_id
-    job.mkdir(parents=True)
-    ext = Path(video.filename or "upload.mp4").suffix or ".mp4"
-    dest = job / f"input{ext}"
-    with dest.open("wb") as f:
-        shutil.copyfileobj(video.file, f)
-    if mode == "hf":
-        try:
-            try:
-                from backend.hf_client import analyze_via_space
-            except ImportError:
-                from hf_client import analyze_via_space  # ran from backend/
-            report, png_tmp, md_tmp = analyze_via_space(str(dest))
-            report["preview"] = False
-            shutil.copy(png_tmp, job / "report.png")
-            shutil.copy(md_tmp, job / "report.md")
-            (job / "report.json").write_text(json.dumps(report, indent=1))
-        except Exception as e:
-            return JSONResponse({"error": f"space call failed: {e}"}, status_code=502)
-        return {"job_id": job_id, "preview": False,
-                "neural_source": report.get("neural_source", "tribev2-full"), "report": report}
-    try:
-        report = run_preview(job, dest, video.filename or dest.name)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-    try:  # one report per video: replace older previews of the same upload name
-        import rescore as RS
-        RS.supersede(job)
-    except Exception:  # noqa: BLE001 - never fail the upload over cleanup
-        pass
-    return {"job_id": job_id, "preview": True,
-            "neural_source": NEURAL_SOURCE, "report": report}
-
-
-@app.get("/report/{job_id}.md")
-def get_md(job_id: str):
-    p = OUT / job_id / "report.md"
-    rj = OUT / job_id / "report.json"
-    if rj.exists():  # regenerate so it follows the current display rules (MVP0: no suggestions)
-        HL.write_md(json.loads(rj.read_text()), p)
-    if not p.exists():
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    return FileResponse(p, media_type="text/markdown")
-
-
-@app.get("/report/{job_id}.png")
-def get_png(job_id: str):
-    p = OUT / job_id / "report.png"
-    if not p.exists():
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    return FileResponse(p, media_type="image/png")
-
-
-@app.get("/report/{job_id}")
-def get_report(job_id: str):
-    p = OUT / job_id / "report.json"
-    if not p.exists():
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    return json.loads(p.read_text())
-
-
-def _is_png(p: Path) -> bool:
-    return p.exists() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-def _fmt_t(sec) -> str:
-    sec = int(round(sec))
-    return f"{sec // 60}:{sec % 60:02d}"
-
-
-def _chart_svg(r: dict) -> str:
-    """Per-second attention + survival as a full-width SVG, drawn from report.json."""
-    import html
-    att = r.get("series", {}).get("attention") or []
-    surv = r.get("series", {}).get("survival_pct") or []
-    cuts = r.get("series", {}).get("cuts_s") or []
-    if not att:
-        return "<p class=muted>No per-second series in this report.</p>"
-    T = len(att)
-    m = r.get("moments", {})
-    # x in seconds (0..T), y in percent (0 top = 100%); stretched to the box, strokes stay crisp
-    pts = lambda ys: " ".join(f"{i + 0.5:.2f},{100 - max(0, min(100, y)):.2f}" for i, y in enumerate(ys))
-    parts = [f'<rect x="0" y="0" width="{min(3, T)}" height="100" class="hook"/>']
-    for a, b in m.get("drop_zones_s", []):
-        parts.append(f'<rect x="{a}" y="0" width="{max(0.5, b - a)}" height="100" class="drop"/>')
-    sw = m.get("strongest_window_s")
-    if sw:
-        parts.append(f'<rect x="{sw[0]}" y="0" width="{sw[1] - sw[0]}" height="100" class="strong"/>')
-    for g in (25, 50, 75):
-        parts.append(f'<line x1="0" x2="{T}" y1="{g}" y2="{g}" class="grid"/>')
-    for c in cuts:
-        parts.append(f'<line x1="{c}" x2="{c}" y1="0" y2="100" class="cut"/>')
-    if surv:
-        parts.append(f'<polyline points="{pts(surv)}" class="surv"/>')
-    parts.append(f'<polyline points="{pts(att)}" class="att"/>')
-    pk = m.get("peak_attention_at_s")
-    if pk is not None:
-        parts.append(f'<line x1="{pk + 0.5}" x2="{pk + 0.5}" y1="0" y2="100" class="peak"/>')
-    step = max(1, round(T / 10 / 5) * 5) if T > 20 else (2 if T > 8 else 1)
-    ticks = "".join(f'<span style="left:{100 * t / T:.2f}%">{_fmt_t(t)}</span>' for t in range(0, T + 1, step))
-    peak_lbl = f'<span class="pk" style="left:{100 * (pk + 0.5) / T:.2f}%">peak {_fmt_t(pk)}</span>' if pk is not None else ""
-    dots = ""
-    em = r.get("emotion")
-    strong_at = {t: m["emotion"] for m in ((em or {}).get("strong") or {}).get("moments", [])
-                 for t in range(m["start"], m["end"])}
-    if em:  # emotion dots sit on the attention curve: colour = emotion, size = arousal
-        s_ = em["series"]
-        for i, (d, a_) in enumerate(zip(s_["dominant"], s_["arousal"])):
-            if d in ("neutral", "calm") or i >= T:
-                continue
-            size = 6 + 10 * float(a_)
-            y = 100 - max(0, min(100, att[i]))
-            strong_d = strong_at.get(i)
-            dots += (f'<i class="edot{" strong" if strong_d else ""}" data-s="{i}" '
-                     f'data-label="{_fmt_t(i)} · {strong_d + " (strong)" if strong_d else d}" '
-                     f'title="{_fmt_t(i)} {d} (arousal {a_:.2f})" style="left:{100 * (i + 0.5) / T:.2f}%;'
-                     f'top:{y:.2f}%;width:{size:.0f}px;height:{size:.0f}px;background:{EMO_COLORS.get(d, "#888")}"></i>')
-    title = html.escape(f"Attention per second, {T}s")
-    return f"""<figure class="chart" aria-label="{title}">
-  <div class="plot">
-    <div class="yax"><span style="top:0">100</span><span style="top:50%">50</span><span style="top:100%">0</span></div>
-    <svg viewBox="0 0 {T} 100" preserveAspectRatio="none" role="img"><title>{title}</title>{''.join(parts)}</svg>
-    <div class="peaklbl">{peak_lbl}</div>
-    <div class="edots">{dots}</div>
-    <div class="etip" id="etip" hidden></div>
-    <div class="playhead" id="playhead" hidden></div>
-  </div>
-  <div class="xax">{ticks}</div>
-  <figcaption>
-    <span><i class="sw att"></i>attention (avg second &asymp; 50)</span>
-    <span><i class="sw surv"></i>est. viewers remaining %</span>
-    <span><i class="sw hook"></i>hook window 0-3s</span>
-    <span><i class="sw drop"></i>drop zone</span>
-    <span><i class="sw strong"></i>strongest window</span>
-    <span><i class="sw cut"></i>scene cut</span>
-  </figcaption>
-</figure>"""
-
-
-VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
-
-
-def report_name(r: dict, job: str):
-    """Name a report is listed under: its video file's name. None = not listed (video gone,
-    or no real file name, e.g. old uploads stored as input.mp4 or the built-in demo)."""
-    video = r.get("local_video")
-    if job == "demo" or not video or not Path(video).is_file():
-        return None
-    name = r.get("source_id") or Path(video).stem
-    return None if name in ("input", job) else name
-
-
-@app.post("/import/{space_job}")
-def import_space_job(space_job: str, video: str, source_id: str = ""):
-    """Fetch a finished Space job's raw output and build its report locally (the Space only
-    does GPU work; scoring lives here so formula changes apply instantly)."""
-    import rescore as RS
-    if not Path(video).is_file():
-        return JSONResponse({"error": f"local video not found: {video}"}, status_code=400)
-    try:
-        job_dir = RS.fetch_raw(space_job)
-        report = RS.rescore(job_dir, video, source_id or None)
-        report["replaced"] = RS.supersede(job_dir)  # one report per video
-    except Exception as e:  # noqa: BLE001 - surfaced to the caller
-        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=502)
-    return {"job_id": f"s-{space_job}", "report": report}
-
-
-_VERIFYING = set()
-
-
-@app.post("/report/{job_id}/verify")
-def verify_report(job_id: str, redirect: bool = False):
-    """Model-check the top editing suggestions (renders each edit, one full GPU run per edit)."""
-    import threading
-    from fastapi.responses import RedirectResponse
-    if job_id in _VERIFYING:
-        return JSONResponse({"status": "already running"}, status_code=409)
-    p = OUT / job_id / "report.json"
-    if not p.exists() or not (OUT / job_id / "raw" / "meta.json").exists():
-        return JSONResponse({"error": "needs a full-analysis report"}, status_code=404)
-
-    def run():
-        import verify as VF
-        _VERIFYING.add(job_id)
-        try:
-            VF.verify(OUT / job_id)
-        except Exception as e:  # noqa: BLE001 - shown on the report page
-            r = json.loads(p.read_text())
-            r["verify_status"] = f"failed: {type(e).__name__}: {e}"[:300]
-            p.write_text(json.dumps(r, indent=1))
-        finally:
-            _VERIFYING.discard(job_id)
-
-    threading.Thread(target=run, daemon=True).start()
-    if redirect:
-        return RedirectResponse(f"/report/{job_id}/view", status_code=303)
-    return {"job_id": job_id, "status": "started"}
-
-
-@app.get("/report/{job_id}/variant/{name}")
-def report_variant(job_id: str, name: str):
-    v = OUT / job_id / "variants" / name / "edited.mp4"
-    if not v.exists() or ".." in name:
-        return JSONResponse({"error": "no such variant"}, status_code=404)
-    return FileResponse(v, media_type="video/mp4")
-
-
-@app.post("/report/{job_id}/regenerate")
-def regenerate(job_id: str, redirect: bool = False):
-    """Rebuild a report from its stored raw model output with the current formulas."""
-    import rescore as RS
-    from fastapi.responses import RedirectResponse
-    if not (OUT / job_id / "raw" / "meta.json").exists():
-        return JSONResponse({"error": "no raw output stored for this report"}, status_code=404)
-    try:
-        report = RS.rescore(OUT / job_id)
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
-    if redirect:
-        return RedirectResponse(f"/report/{job_id}/view", status_code=303)
-    return {"job_id": job_id, "report": report}
-
-
-def _local_video(job_id: str, r: dict):
-    """The reel on this machine: the path saved with the report, else the preview job's upload."""
-    demo = [TRIBE / "samples" / "sneaker.mp4"] if job_id == "demo" else []  # demo report's source reel
-    for cand in (r.get("local_video"), *(OUT / job_id).glob("input.*"), *demo):
-        if cand and Path(cand).is_file() and Path(cand).suffix.lower() in VIDEO_EXT:
-            return Path(cand)
-    return None
-
-
-@app.get("/report/{job_id}/video")
-def report_video(job_id: str):
-    p = OUT / job_id / "report.json"
-    if not p.exists():
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    v = _local_video(job_id, json.loads(p.read_text()))
-    if v is None:
-        return JSONResponse({"error": "local video not found"}, status_code=404)
-    return FileResponse(v, media_type="video/mp4")
-
-
-@app.get("/report/{job_id}/poster.jpg")
-def report_poster(job_id: str):
-    """One frame of the reel (at 1 s) for decks and previews; cached next to the report."""
-    import subprocess
-    p = OUT / job_id / "report.json"
-    if not p.exists():
-        return JSONResponse({"error": "unknown job"}, status_code=404)
-    out = OUT / job_id / "poster.jpg"
-    if not out.exists():
-        v = _local_video(job_id, json.loads(p.read_text()))
-        if v is None:
-            return JSONResponse({"error": "local video not found"}, status_code=404)
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(v), "-frames:v", "1",
-                        "-vf", "scale=540:-2", str(out)], check=False)
-    if not out.exists():
-        return JSONResponse({"error": "could not extract a frame"}, status_code=500)
-    return FileResponse(out, media_type="image/jpeg")
-
-
-EMO_COLORS = {'amusement': '#f5b301', 'excitement': '#f97316', 'awe': '#7c3aed', 'admiration': '#a78bfa', 'adoration': '#f9a8d4', 'satisfaction': '#2dd4bf', 'craving': '#d97706', 'surprise': '#ec4899', 'interest': '#06b6d4', 'nostalgia': '#c4b5fd', 'romance': '#e11d48', 'hope': '#84cc16', 'empathic_pain': '#fb7185', 'sadness': '#3b82f6', 'fear': '#ef4444', 'anger': '#b91c1c', 'disgust': '#65a30d', 'awkwardness': '#a3a3a3', 'moved': '#22c55e', 'laughter': '#f5b301', 'outrage': '#b91c1c', 'sorrow': '#3b82f6'}
-
-
-def _emotion_html(r: dict) -> str:
-    import html
-    em = r.get("emotion")
-    if not em:
-        return ""
-    s = em["series"]
-    T = len(s["arousal"]) or 1
-    cells = "".join(f'<i title="{_fmt_t(t)} {d}" style="flex:1;background:{EMO_COLORS.get(d, "#555")};'
-                    f'opacity:{0.15 + 0.85 * a:.2f}"></i>' for t, (d, a) in enumerate(zip(s["dominant"], s["arousal"])))
-    sm = em["summary"]
-    dom = ", ".join(f'{x["emotion"]} {x["share"]:.0%}' for x in sm.get("dominant_emotions", [])) or "no clear emotion"
-    if sm.get("no_clear_share") is not None:
-        dom += f' · no clear emotion {sm["no_clear_share"]:.0%}'
-    if sm.get("confidence"):
-        dom += (f' · confidence {sm["confidence"]} ({sm.get("channels_agreeing", 0):.1f} channels agree on average)'
-                if sm["confidence"] != "none" else "")
-    peaks = ", ".join(f'{_fmt_t(p["at_s"])} {p["emotion"]}' for p in sm.get("peak_moments", [])) or "none"
-    shown = set(s["dominant"]) - {"neutral", "calm"}
-    legend = "".join(f'<span><i class=sw style="background:{c}"></i>{e.replace("_", " ")}</span>'
-                     for e, c in EMO_COLORS.items() if e in shown)
-    br = em.get("brain_salience_r")
-    st = em.get("strong") or {}
-    if st:
-        parts = [f'{e} {d}s' for e, d in (st.get("durations_s") or {}).items() if d]
-        laugh = st.get("audible_laughter_s")
-        laugh_txt = "" if laugh is None else f' · audible laughter in the audio: {laugh}s' if laugh else ' · no audible laughter in the audio'
-        strong_line = (f'<p><b>Strong emotions</b> (predicted peaks the viewer feels: amusement, awe, outrage, sorrow): '
-                       f'{html.escape(", ".join(parts)) if parts else "none detected"} · '
-                       f'{st.get("seconds", 0)}s of {T}s ({st.get("share", 0):.0%}) → '
-                       f'<b>emotional strength {st.get("score", 0):.0f}/100</b>{laugh_txt}'
-                       f'{" · moments " + html.escape(", ".join(_fmt_t(m["start"]) + "-" + _fmt_t(m["end"]) + " " + m["emotion"] for m in st.get("moments", [])[:5])) if st.get("moments") else ""}</p>')
-    else:
-        strong_line = ""
-    return f"""<div class=emo><div class=band title="emotion per second (colour = emotion, strength = arousal)">{cells}</div>
-{strong_line}
-<p><b>Emotion</b> (predicted, evoked for an average viewer): {html.escape(dom)} ·
-sequence {html.escape(" → ".join(sm.get("sequence", [])) or "-")} · arc {html.escape(sm.get("arc", "-"))} ·
-high-arousal share {sm.get("high_arousal_share", 0):.0%} · emotional peaks {html.escape(peaks)} ·
-<span class=muted>insight only, not a viral-potential input (2026-10-14 ablation: the lift cut
-outlier-vs-low separation, `.ai/research/scoring-heuristic.md`)</span></p>
-<p class=muted>channels: {", ".join(em.get("channels", []))}{f" · brain salience agreement r={br:+.2f}" if br is not None else ""}
-· {html.escape(em.get("note", ""))}</p><figcaption>{legend}</figcaption></div>"""
-
-
-def _music_html(r: dict) -> str:
-    import html
-    mu = (r.get("music") or {}).get("summary")
-    mood = (r.get("emotion") or {}).get("music_mood")
-    if not mu and not mood:
-        return ""
-    bits = []
-    if mu:
-        bits.append(f'{mu["tempo_bpm"]:.0f} BPM')
-        bits.append(mu["mode_label"])
-        if mu.get("buildups"):
-            bits.append("build-ups " + ", ".join(f'{_fmt_t(x["start"])}-{_fmt_t(x["end"])} (+{x["rise_db"]:.0f} dB)'
-                                                 for x in mu["buildups"][:3]))
-        if mu.get("drops"):
-            bits.append("drops at " + ", ".join(_fmt_t(x["at"]) for x in mu["drops"][:4]))
-        if mu.get("beat_cut_sync") is not None:
-            bits.append(f'cuts on the beat {mu["beat_cut_sync"]:.0%}')
-    if mood:
-        bits.append("mood " + " → ".join(mood.get("sequence", [])[:6]) + " (" +
-                    ", ".join(f"{k} {v:.0%}" for k, v in mood.get("shares", {}).items()) + ")")
-    return f'<p><b>Music</b>: {html.escape(" · ".join(bits))}</p>'
-
-
-def _caption_html(r: dict) -> str:
-    """The creator's caption (only when given): verdict, evidence, emotion it adds, effect on viral potential."""
-    import html
-    import caption as CAP
-    cap = r.get("caption")
-    if not cap:
-        return ""
-    ev = cap.get("evidence") or {}
-    ok = cap.get("relevance", 0) > 0
-    rows = []
-    if ev.get("frames_z") is not None:
-        rows.append(f'<li>Frames: fits this reel better than {ev.get("frames_beats_other_reels", 0):.0%} of other reels '
-                    f'(z {ev["frames_z"]:.1f}; a generic caption fits every reel about equally)</li>')
-    if ev.get("transcript_z") is not None:
-        rows.append(f'<li>Speech: closer to the transcript than {ev.get("transcript_beats_controls", 0):.0%} of unrelated '
-                    f'captions (z {ev["transcript_z"]:.1f})</li>')
-    emo = (cap.get("emotion") or {}).get("top") or []
-    if ok and emo:
-        rows.append("<li>Adds emotional context: " + html.escape(", ".join(f"{e} {p:.0%}" for e, p in emo)) + "</li>")
-    v0, tag0, _ = without_caption(r["scores"], cap)
-    effect = (f'<b>+{cap.get("virality_points", 0):.1f}</b> viral potential (relevance {cap["relevance"]:.2f}); '
-              f'without this caption: <b>{v0:.0f}</b> ({html.escape(tag0)})' if ok else "no effect: ignored")
-    return (f'<section class=caption><h2>Caption <span class=muted>({html.escape(cap.get("verdict", ""))})</span></h2>'
-            f'<blockquote>{html.escape(cap["text"])}</blockquote>'
-            f'<p>Effect: {effect}. A caption counts from z {CAP.Z_LOW} on frames or speech; full effect at z {CAP.Z_HIGH}.</p>'
-            f'<ul class=muted>{"".join(rows)}</ul></section>')
-
-
-WEIGHT_LABELS = {"hook": "Hook (first 3s)", "drop_free": "Few drop-offs", "strong_moments": "Strong-attention moments",
-                 "ending": "Ending", "emotion_lift": "Emotional peaks", "caption": "Caption context"}
-
-
-def _weights_html() -> str:
-    """Editable weights for every report: saved to tribe/virality_weights.json, applied to all reports."""
-    import importlib
-    import weights as WT
-    importlib.reload(WT)
-    W = WT.load()
-    field = lambda k: (f'<label class=wf for="w-{k}"><span>{WEIGHT_LABELS[k]}</span>'
-                       f'<input id="w-{k}" name="{k}" type=number min=0 max=1 step=0.05 value="{W[k]:g}">'
-                       f'<em>default {WT.DEFAULTS[k]:g}</em></label>')
-    lift_keys = [k for k in WT.DEFAULTS if k not in WT.BASE_KEYS]
-    changed = any(abs(W[k] - WT.DEFAULTS[k]) > 1e-9 for k in WT.DEFAULTS)
-    return (f'<details class=weights{" open" if changed else ""}><summary>Weights (multipliers) for all reports'
-            f'{" · custom" if changed else " · defaults"}</summary>'
-            f'<form id=wform>'
-            f'<fieldset class=wgroup><legend>Attention weights <span class=muted>· must add up to 1</span></legend>'
-            f'<div class="wgrid four">{"".join(field(k) for k in WT.BASE_KEYS)}</div>'
-            f'<p class=wsum>Total: <b id=wtotal>{sum(W[k] for k in WT.BASE_KEYS):.2f}</b> / 1.00</p></fieldset>'
-            f'<fieldset class=wgroup><legend>Lifts <span class=muted>· 0-1 for all</span></legend>'
-            f'<div class="wgrid two">{"".join(field(k) for k in lift_keys)}</div></fieldset>'
-            f'<div class=wactions><button type=submit class=wapply id=wapply>Apply to all reports</button>'
-            f'<button type=button id=wreset>Reset to defaults</button><span id=wmsg class=muted>'
-            f'Changes apply to every report at once.</span></div>'
-            f'</form></details>')
-
-
-def _calc_html(b: list, s: dict) -> str:
-    """Step-by-step viral-potential arithmetic (same steps the factor switches recompute in the page)."""
-    import html
-    base_rows = [x for x in b if x["key"] not in ("emotion_lift", "caption") and x.get("points") is not None]
-    if not base_rows:
-        return f'<li class=res><span>Viral potential</span><b>{s["virality"]:.0f}</b></li>'
-    ws = sum(x["weight"] for x in base_rows)
-    base = sum(x["weight"] * x["value"] for x in base_rows) / ws
-    terms = " + ".join(f'{x["weight"]:g} × {x["value"]:.0f} <i>{html.escape(x["label"].lower())}</i>' for x in base_rows)
-    out = [f'<li><span>Attention base</span><code>({terms}) ÷ {ws:g}</code><b>{base:.1f}</b></li>']
-    v = base
-    for x in b:
-        if x["key"] in ("emotion_lift", "caption") and x.get("points") is not None:
-            add = x["weight"] * (x["value"] / 100) * (100 - v)
-            out.append(f'<li><span>+ {html.escape(x["label"])}</span><code>{x["weight"]:g} × {x["value"]:.0f}/100 × '
-                       f'(100 − {v:.1f})</code><b>+{add:.1f}</b></li>')
-            v += add
-    out.append(f'<li class=res><span>Viral potential</span><code>{v:.1f}, rounded</code>'
-               f'<b>{v:.0f} <em>{html.escape(HL.virality_tag(v))}</em></b></li>')
-    return "".join(out)
-
-
-def _virality_html(r: dict) -> str:
-    """Why this viral potential: each factor's score, points, and pull vs a typical reel (diverging bar)."""
-    import html
-    s = r.get("scores") or {}
-    b = s.get("virality_breakdown") or []
-    if not b:
-        return ""
-    if s.get("virality_summary") is None:  # report scored before the summary existed
-        s["virality_summary"] = HL.virality_summary(s)
-    span = max(10.0, max(abs(x["vs_typical"]) for x in b))
-    top = max(b, key=lambda x: abs(x["vs_typical"]))
-    rows = []
-    for x in b:
-        d = x["vs_typical"]
-        w = 50 * abs(d) / span  # % of the bar track; the centre line is a typical reel
-        bar = (f'<span class=vbar><i class="{"up" if d >= 0 else "down"}" '
-               f'style="{"left:50%" if d >= 0 else f"left:{50 - w:.1f}%"};width:{w:.1f}%"></i></span>')
-        pts = "" if x.get("points") is None else f'{x["points"]:.1f}'
-        kind = "lift" if x["key"] in ("emotion_lift", "caption") else "base"
-        toggle = (f'<label class=fsw title="Include this factor in the final rating"><input type=checkbox checked '
-                  f'data-key="{html.escape(x["key"])}" data-kind={kind} data-value="{x["value"]}" data-weight="{x["weight"]}">'
-                  f'<span></span></label>' if x.get("points") is not None else "")
-        rows.append(f'<tr{" class=top" if x is top else ""}><td class=fcell>{toggle}{html.escape(x["label"])}</td>'
-                    f'<td class=num>{x["value"]:.0f}</td><td class=num>×{x["weight"]}</td><td class=num>{pts}</td>'
-                    f'<td>{bar}</td><td class="num {"pos" if d >= 0 else "neg"}">{d:+.1f}</td>'
-                    f'<td class=muted>{html.escape(x["explain"])}</td></tr>')
-    calc = _calc_html(b, s)
-    tiers = json.dumps(HL.VIRALITY_TIERS)
-    return (f'<section class=why data-tiers=\'{tiers}\'><h2>Why viral potential <span id=vpnum>{s["virality"]:.0f}</span> '
-            f'<span class=muted>(<span id=vptag>{html.escape(s.get("virality_tag", s.get("virality_band", "")))}</span>)</span></h2>'
-            f'<p>{html.escape(s.get("virality_summary") or "")}</p>'
-            f'<p id=vpwhatif class=whatif hidden></p>'
-            f'<div class=wrap><table><tr><th>Factor <span class=muted>(switch to include / exclude)</span></th><th>Score /100</th><th>Weight</th><th>Points</th>'
-            f'<th>vs a typical reel (factor at 50)</th><th></th><th>What it measures here</th></tr>{"".join(rows)}</table></div>'
-            f'<div class=calcbox><h3>How the score is calculated</h3><ol id=vpcalc>{calc}</ol>'
-            f'<p class=calcnote>Uncalibrated heuristic: weights are set by hand until fitted on real view counts; '
-            f'it judges the video only, never the account.</p></div>{_weights_html()}</section>')
-
-
-def _suggestions_html(r: dict, job_id: str) -> str:
-    import html
-    sugs = r.get("suggestions") or []
-    if not sugs:
-        return ""
-    status = r.get("verify_status")
-    running = bool(status and status.startswith("running"))
-    can_verify = (OUT / job_id / "raw" / "meta.json").exists()
-    items = []
-    for s in sugs:
-        v = s.get("verification")
-        if v and v.get("verdict") in ("improved", "worse", "no clear change"):
-            color = {"improved": "var(--hook)", "worse": "var(--drop)"}.get(v["verdict"], "var(--muted)")
-            name = Path(v.get("edited_video", "")).parent.name
-            badge = (f'<span class=badge style="border-color:{color};color:{color}">model-checked: {v["verdict"]}'
-                     f' · engagement {v["engagement_change_pct"]:+.1f}%'
-                     f'{" · first 3s " + format(v["first_3s_change_pct"], "+.1f") + "%" if s["edit"] == "cold_open" else ""}'
-                     f'</span> <details class=variant><summary>watch the edited version</summary>'
-                     f'<video controls preload=none src="/report/{job_id}/variant/{name}"></video>'
-                     f'{"<p class=muted>Simulation: " + html.escape(v["approximate"]) + "</p>" if v.get("approximate") else ""}'
-                     f'</details>')
-        elif v:
-            badge = f'<span class="badge muted">{html.escape(v.get("verdict", ""))}: {html.escape(v.get("reason", ""))}</span>'
-        else:
-            badge = '<span class="badge muted">not model-checked yet</span>'
-        items.append(f'<li><b>{html.escape(s["at"])}</b> {html.escape(s["suggestion"])} {badge}'
-                     f'<br><span class=muted>Why: {html.escape(s["why"])}. Est. viewers lost here: '
-                     f'{s["impact"]["viewers_lost_pct"]:.1f}% (model estimate).</span></li>')
-    btn = ""
-    if can_verify and not running:
-        btn = (f'<form method=post action="/report/{job_id}/verify?redirect=true" style="display:inline">'
-               f'<button>Verify top 3 edits (~2-3 min each)</button></form>')
-    st = f'<span class=muted>{html.escape(status)}</span>' if status else ""
-    return (f'<h2>Editing suggestions <span class=muted style="font-weight:400;font-size:1rem">'
-            f'ranked by viewers lost</span></h2>{btn} {st}<ol class=sugs>{"".join(items)}</ol>')
-
-
-def _transcript_html(r: dict) -> str:
-    import html
-    tr = r.get("transcript")
-    if not isinstance(tr, dict) or ("segments" not in tr and "status" not in tr):
-        return ""
-    head = (f'<h2>Transcript {"used for judging" if tr.get("used_by_model") else "(not used for judging)"}</h2>'
-            f'<p class=muted>{html.escape(str(tr.get("status", "")))}'
-            f'{" · " + html.escape(str(tr.get("model"))) if tr.get("model") else ""}'
-            f'{" · detected " + html.escape(str(tr.get("detected"))) if tr.get("detected") else ""}'
-            f'{" · " + str(tr.get("words")) + " words" if tr.get("words") is not None else ""}'
-            f'{" · guard dropped " + html.escape(str(tr.get("dropped_by_guard"))) if tr.get("dropped_by_guard") else ""}'
-            f'</p>')
-    segs = tr.get("segments") or []
-    if not segs:
-        return head
-    rows = "".join(f'<li><a class=ts href="#" data-t="{s["start"]}">{_fmt_t(s["start"])}</a> '
-                   f'{html.escape(s["text"])}</li>' for s in segs)
-    return head + f'<ul class=transcript>{rows}</ul>'
-
-
-def analysed_at(report_json: Path) -> float:
-    """When the reel was analysed: the model output's time, not report.json's (re-scoring rewrites that)."""
-    d = report_json.parent
-    for f in (d / "raw" / "preds.npy", d / "preds.npy", report_json):  # preds are never rewritten
-        if f.exists():
-            return f.stat().st_mtime
-    return 0.0
-
-
-def without_caption(scores: dict, cap):
-    """Viral potential if the caption had not been given: the caption's only effect on the score is
-    its own "Caption context" lift (caption emotion never makes strong peaks). Returns (score, tag, lift)."""
-    lift = float((cap or {}).get("virality_points") or 0.0)
-    v = scores["virality"] - lift
-    return v, HL.virality_tag(v), lift
-
-
-REPORT_SORTS = {"viral": "viral first", "latest": "latest first", "oldest": "oldest first"}
-
-
-@app.get("/weights")
-def get_weights():
-    import importlib
-    import weights as WT
-    importlib.reload(WT)
-    return {"weights": WT.load(), "defaults": WT.DEFAULTS}
-
-
-@app.post("/weights")
-async def set_weights(request: Request):
-    """Save new viral-potential weights and re-apply them to every report right away (no re-analysis:
-    each report keeps its factor values). Body: {"weights": {...}} or {"reset": true}."""
-    import importlib
-    import weights as WT
-    importlib.reload(WT)
-    importlib.reload(HL)
-    body = await request.json()
-    try:
-        W = WT.reset() if body.get("reset") else WT.save(body.get("weights") or {})
-    except (ValueError, TypeError) as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    n = 0
-    for p in OUT.glob("*/report.json"):
-        try:
-            r = json.loads(p.read_text())
-            if not (r.get("scores") or {}).get("virality_breakdown"):
-                continue
-            HL.apply_weights(r, W)
-            p.write_text(json.dumps(r, indent=1))
-            HL.write_md(r, p.with_name("report.md"))
-            n += 1
-        except Exception as e:  # noqa: BLE001 - one bad report must not block the rest
-            print(f"[weights] skipped {p.parent.name}: {e}", flush=True)
-    return {"weights": W, "updated": n}
-
-
-@app.post("/launch-ui")
-def launch_ui(request: Request):
-    """Open the Hookline user interface (TUI) in a new Terminal window. Local demo only: refuses
-    anything but requests from this machine, and only ever runs ./run-demo.sh."""
-    import subprocess
-    if (request.client.host if request.client else "") not in ("127.0.0.1", "::1", "localhost"):
-        return JSONResponse({"error": "Only available on the presenting machine."}, status_code=403)
-    if sys.platform != "darwin":
-        return JSONResponse({"error": "Launching a terminal is only set up for macOS. Run ./run-demo.sh instead."})
-    cmd = f"cd {json.dumps(str(ROOT))} && ./run-demo.sh"
-    r = subprocess.run(["osascript", "-e", f'tell application "Terminal" to do script {json.dumps(cmd)}',
-                        "-e", 'tell application "Terminal" to activate'], capture_output=True, text=True, timeout=20)
-    if r.returncode != 0:
-        return JSONResponse({"error": f"Could not open Terminal: {r.stderr.strip()[:160]}. Run ./run-demo.sh instead."})
-    return {"message": "The user interface is opening in a new Terminal window."}
-
-
-@app.get("/pitch", response_class=HTMLResponse)
-def pitch():
-    """Pitch deck rendered from pitch/deck.md with live report blocks (edit the file, refresh)."""
-    import importlib
-    P = importlib.reload(importlib.import_module("backend.pitch"))
-    return HTMLResponse(P.render(sys.modules[__name__]))
-
-
-@app.get("/reports", response_class=HTMLResponse)
-def list_reports(sort: str = "viral", caption: str = "on"):
-    """All saved reports: viral first (default), latest first or oldest first; refreshes itself so
-    batch results appear as they land."""
-    import html
-    import time as _time
-    sort = "latest" if sort == "recent" else sort if sort in REPORT_SORTS else "viral"
-    ignore_cap = caption == "off"
-    rows, n_cap = [], 0
-    for p in OUT.glob("*/report.json"):
-        try:
-            r = json.loads(p.read_text())
-            s = r["scores"]
-        except Exception:
-            continue
-        job = p.parent.name
-        name = report_name(r, job)
-        if name is None:
-            continue
-        full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
-        if not full:  # the list shows full analyses only; quick previews stay on disk, reachable by URL
-            continue
-        audio = (r.get("audio") or {}).get("type") or "-"
-        song = (r.get("audio") or {}).get("song")
-        at = analysed_at(p)
-        v = s["virality"]
-        tag = s.get("virality_tag", s.get("virality_band", ""))
-        cap = r.get("caption")
-        lift = 0.0
-        if cap:
-            n_cap += 1
-            if ignore_cap:
-                v, tag, lift = without_caption(s, cap)
-        delta = (f'<span class=delta>{-lift:+.1f} without caption</span>' if ignore_cap and lift > 0 else
-                 '<span class="delta same">caption had no effect</span>' if ignore_cap and cap else "")
-        rows.append((v, at, full, f'<tr><td class=reel><a href="/report/{job}/view">{html.escape(name)}</a>'
-                    f'<span class=sub>{"Full analysis" if full else "Quick preview"}'
-                    f'{(" + caption matched" if cap.get("relevance", 0) > 0 else " + caption ignored") if cap else ""}</span></td>'
-                    f'<td><div class=vp><b class=num>{v:.0f}</b><span class=meter><i style="width:{max(0, min(100, v)):.0f}%"></i></span>'
-                    f'<span class="chip {T.tier_class(tag)}">{html.escape(tag)}</span>{delta}</div></td>'
-                    f'<td class=num>{s["hook_pct"]:.0f}</td><td class=num>{s["hold_rate_pct"]:.0f}%</td><td class=num>{s["finish_pct"]:.0f}%</td>'
-                    f'<td class=muted>{html.escape(audio.replace("_", " "))}{" · &#9834; " + html.escape(song["title"]) if song else ""}</td>'
-                    f'<td class="num muted">{r.get("duration_s", 0):.0f} s</td>'
-                    f'<td class="num muted mono">{_time.strftime("%b %d %H:%M", _time.localtime(at))}</td></tr>'))
-    key = {"viral": lambda x: (-x[0], -x[1]), "latest": lambda x: -x[1], "oldest": lambda x: x[1]}[sort]
-    rows = [x[3] for x in sorted(rows, key=key)]
-    options = "".join(f'<option value={k}{" selected" if k == sort else ""}>{label}</option>' for k, label in REPORT_SORTS.items())
-    empty = '<tr><td colspan=7 class=empty>No reports yet. Analyze a reel in the TUI (Enter or a) and it appears here.</td></tr>'
-    return f"""<!doctype html><html lang=en><head>{T.page_head("Hookline reports")}
-<script>/* live list: reload every 5s, but never while the sort menu is open */
-setInterval(()=>{{if(!["sort","capsw"].includes(document.activeElement?.id))location.reload()}},5000)</script>
-<style>{T.TOKENS}
-/* Layout: one column, max 1180px; header bar, summary line, one table panel. */
-.wrapper{{max-width:1180px;margin:0 auto;padding-block:28px 48px;padding-inline:clamp(16px,4vw,32px);display:flex;flex-direction:column;gap:20px}}
-.bar{{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
-.brand{{font:700 1.05rem var(--display);display:flex;align-items:center;gap:8px}}
-.brand i{{width:9px;height:9px;border-radius:50%;background:var(--accent)}}
-.nav{{display:flex;gap:16px;font-size:.92rem}}
-h1{{font-size:clamp(1.7rem,3vw,2.4rem)}}
-.summary{{display:flex;flex-wrap:wrap;gap:10px 24px;align-items:center;color:var(--muted);font-size:.95rem}}
-.summary b{{color:var(--ink);font-family:var(--mono);font-weight:500}}
-label.sort{{display:flex;gap:8px;align-items:center;margin-left:auto;font-size:.9rem;color:var(--muted)}}
-select{{font:500 .92rem var(--sans);color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 10px}}
-.panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow-x:auto}}
-table{{width:100%;border-collapse:collapse;font-size:.94rem}}
-th,td{{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:middle}}
-tbody tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:var(--sunken)}}
-th{{font:500 .72rem/1.2 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--sunken);white-space:nowrap}}
-th.num,td.num{{text-align:right;white-space:nowrap}}
-td.reel a{{font-weight:600;text-decoration:none;color:var(--ink)}} td.reel a:hover{{color:var(--accent)}}
-td.reel .sub{{display:block;font-size:.8rem;color:var(--muted)}}
-.vp{{display:flex;align-items:center;gap:10px;white-space:nowrap}}
-.vp b{{font:600 1.15rem var(--mono);min-width:2ch;text-align:right}}
-.meter{{width:72px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}} .meter i{{display:block;height:100%;background:var(--accent)}}
-.empty{{text-align:center;color:var(--muted);padding:40px 16px}}
-.delta{{font:500 .8rem var(--mono);color:var(--bad)}} .delta.same{{color:var(--muted);font-family:var(--sans)}}
-label.capsw{{display:flex;gap:8px;align-items:center;font-size:.92rem;color:var(--ink);cursor:pointer}}
-label.capsw input{{width:18px;height:18px;accent-color:var(--accent)}}
-.note{{font-size:.85rem;color:var(--muted)}}
-</style></head><body><div class=wrapper>
-<div class=bar><span class=brand><i></i>Hookline</span><nav class=nav><a href="/pitch">Pitch deck</a><a href="/">Upload a video</a></nav></div>
-<h1>Reports</h1>
-<div class=summary><span><b>{len(rows)}</b> reels, full analysis</span><span><b>{n_cap}</b> with a caption</span><span>refreshes every 5 s</span>
-<label class=capsw for=capsw><input type=checkbox id=capsw {"checked" if ignore_cap else ""}
- onchange="go()"> Ignore captions <span class=muted>(score as if no caption was given)</span></label>
-<label class=sort for=sort>Sort <select id=sort onchange="go()">{options}</select></label></div>
-<script>function go(){{const q=new URLSearchParams();q.set('sort',document.getElementById('sort').value);
-if(document.getElementById('capsw').checked)q.set('caption','off');location.search='?'+q.toString()}}</script>
-<div class=panel><table><thead><tr><th>Reel</th><th>Viral potential</th><th class=num>Hook</th><th class=num>Hold</th><th class=num>Finish</th>
-<th>Audio</th><th class=num>Length</th><th class=num>Analysed</th></tr></thead><tbody>{''.join(rows) or empty}</tbody></table></div>
-<p class=note>Viral potential, hook, hold and finish are model estimates: within-video, uncalibrated. Views and follower counts are never inputs.</p>
-</div></body></html>"""
-
-
-@app.get("/report/{job_id}/view", response_class=HTMLResponse)
-def view_report(job_id: str, caption: str = "on"):
-    import html
-    p = OUT / job_id / "report.json"
-    if not p.exists():
-        return HTMLResponse("unknown job", status_code=404)
-    r = json.loads(p.read_text())
-    s = r["scores"]
-    full = r.get("preview") is False or "full" in str(r.get("neural_source", ""))
-    mode = ("Full analysis" + (" + caption" if r.get("caption") else "")) if full else "Quick preview"
-    cap = r.get("caption")
-    v0, tag0, lift = without_caption(s, cap)
-    ignore_cap = caption == "off" and bool(cap)
-    vp_val, vp_tag = (v0, tag0) if ignore_cap else (s["virality"], s.get("virality_tag", s["virality_band"]))
-    md = OUT / job_id / "report.md"
-    if not md.exists() or md.read_text(errors="ignore").startswith('{"error"'):
-        HL.write_md(r, md)  # Space jobs may come back without markdown; it only needs report.json
-    png = OUT / job_id / "report.png"
-    png_html = (f'<details><summary>Full chart (PNG)</summary><img src="/report/{job_id}.png" alt="chart"></details>'
-                if _is_png(png) and HL.SHOW_SUGGESTIONS else "")
-    gate = r.get("speech_gate")
-    audio = r.get("audio") or {}
-    gate_html = ""
-    if gate:
-        kinds = {"song": "Song", "speech_over_music": "Speech over music", "speech": "Speech",
-                 "instrumental": "Instrumental music", "humming": "Humming / chant", "other": "No clear speech"}
-        rt = gate.get("ratios", {})
-        mix = " · ".join(f"{k} {v:.0%}" for k, v in rt.items() if k != "silence" and v)
-        song = audio.get("song")
-        song_html = (f' · <b class=song>&#9834; {html.escape(song["title"])} - {html.escape(song["artist"])}</b> '
-                     f'<span class=muted>(on trending list: {html.escape(song.get("list", ""))}, '
-                     f'match {song.get("similarity", 0):.2f})</span>' if song else
-                     ' · <span class=muted>no match in trending catalog</span>')
-        reuse = audio.get("reused_by") or []
-        reuse_html = f" · same audio in {len(reuse)} other analysed reel(s)" if reuse else ""
-        gate_html = (f'<p><b>Audio: {kinds.get(gate.get("audio_type"), "not classified (older report)")}</b>{song_html}{reuse_html}</p>'
-                     f'<p class=muted>{html.escape(mix or "no audio detected")} · '
-                     f'<b>{html.escape(gate.get("decision", ""))}</b> ({html.escape(gate.get("reason", ""))}) · '
-                     f'song/trend info is context only, not a score input</p>')
-    vid = _local_video(job_id, r)
-    video_html = (f'<div class=player><video id=reel controls preload=metadata src="/report/{job_id}/video"></video>'
-                  f'<p class=muted>Local file: <code>{html.escape(str(vid))}</code></p></div>' if vid else
-                  '<p class=muted>Local video not found on this machine.</p>')
-    mods = r.get("modalities")
-    mods_txt = (" · modalities: " + ", ".join(k for k, v in mods.items() if v)) if mods else ""
-    recs = "".join(f"<li><b>{html.escape(x['at'])}</b> {html.escape(x['issue'])}. {html.escape(x['fix'])}</li>"
-                   for x in r["recommendations"])
-    tile = lambda name, val, sub="": (f'<div class="tile"><div class="k">{name}</div><div class="v">{val}</div>'
-                                      f'<div class="s">{sub}</div></div>')
-    return f"""<!doctype html><html lang=en><head>{T.page_head(f"Hookline report · {html.escape(report_name(r, job_id) or job_id)}")}
-{'<meta http-equiv=refresh content=10>' if str(r.get('verify_status', '')).startswith('running') else ''}
-<style>{T.TOKENS}
-/* Layout: one reading column, max 1180px; tiles, then video + chart, then explanation sections. */
-body{{max-width:1180px;margin:0 auto;padding-block:28px 56px;padding-inline:clamp(16px,4vw,32px)}}
-.song{{color:var(--strong)}}
-h1{{font-size:clamp(1.6rem,3vw,2.3rem)}} h1 span{{color:var(--muted);font-weight:500;font-family:var(--sans);font-size:.6em}}
-h2{{font-size:1.25rem;margin:2rem 0 .6rem}} h2 span{{font-family:var(--sans);font-weight:400;font-size:.8em}}
-p{{margin:.5em 0}}
-.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--gap);margin:1.2rem 0}}
-.tile{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;text-align:left}}
-.tile .k{{font:500 .72rem/1.2 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}}
-.tile .v{{font:700 clamp(1.8rem,3.4vw,2.5rem)/1.15 var(--display)}} .tile .s{{color:var(--muted);font-size:.9rem}}
-section.why table,table{{font-variant-numeric:tabular-nums}}
-section.why,section.caption,ul.transcript{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px}}
-ol.sugs{{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 20px 16px 44px}}
-section.why h2,section.caption h2{{margin-top:0}}
-.fcell{{white-space:nowrap}} .fsw{{display:inline-flex;vertical-align:middle;margin-right:10px;cursor:pointer}}
-.fsw input{{position:absolute;opacity:0;width:1px;height:1px}}
-.fsw span{{width:34px;height:20px;border-radius:999px;background:var(--line);position:relative;transition:background .2s}}
-.fsw span::after{{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--surface);transition:transform .2s}}
-.fsw input:checked + span{{background:var(--accent)}} .fsw input:checked + span::after{{transform:translateX(14px)}}
-.fsw input:focus-visible + span{{outline:2px solid var(--accent);outline-offset:2px}}
-tr.off td{{opacity:.45}} tr.off td.fcell{{opacity:1}}
-.calcbox{{margin-top:16px;border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);padding:14px 18px}}
-.calcbox h3{{font-size:1rem;margin:0 0 8px}}
-#vpcalc{{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-variant-numeric:tabular-nums}}
-#vpcalc li{{display:grid;grid-template-columns:180px 1fr auto;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px dashed var(--line)}}
-#vpcalc li span{{font-weight:600}} #vpcalc li code{{color:var(--muted);font-size:.85rem;white-space:normal}} #vpcalc li code i{{font-style:normal;color:var(--faint)}}
-#vpcalc li b{{font:600 1rem var(--mono);text-align:right;white-space:nowrap}}
-#vpcalc li.res{{border-bottom:0;border-top:2px solid var(--line);padding-top:10px}} #vpcalc li.res b{{font:700 1.4rem var(--display);color:var(--accent)}}
-#vpcalc li.res em{{font:500 .85rem var(--sans);color:var(--muted);font-style:normal;margin-left:6px}}
-.calcnote{{margin:10px 0 0;font-size:.82rem;color:var(--muted)}}
-@media (max-width:640px){{#vpcalc li{{grid-template-columns:1fr auto}} #vpcalc li code{{grid-column:1/-1;order:3}}}}
-.weights{{margin-top:14px;border:1px solid var(--line);border-radius:var(--r);padding:10px 16px;background:var(--surface)}}
-.weights summary{{cursor:pointer;font-weight:600}}
-.wgroup{{border:1px solid var(--line);border-radius:var(--r);padding:10px 14px 4px;margin:12px 0 0}}
-.wgroup legend{{font-weight:600;padding:0 6px;font-size:.92rem}}
-.wgrid{{display:grid;gap:12px;margin:8px 0}} .wgrid.four{{grid-template-columns:repeat(4,minmax(0,1fr))}}
-.wgrid.two{{grid-template-columns:repeat(2,minmax(0,1fr));max-width:50%}}
-@media (max-width:640px){{.wgrid.four{{grid-template-columns:1fr 1fr}} .wgrid.two{{max-width:none}}}}
-.wf{{display:flex;flex-direction:column;gap:4px;font-size:.9rem}} .wf em{{font-style:normal;font-size:.75rem;color:var(--muted)}}
-.wf input{{font:600 1rem var(--mono);padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:100%;box-sizing:border-box}}
-.wsum{{margin:0 0 10px;font-size:.92rem}} .wsum b{{font-family:var(--mono)}} .wsum.bad b{{color:var(--bad)}}
-.wactions button:disabled{{opacity:.5;cursor:not-allowed}}
-.wactions{{margin-top:12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}}
-.wactions button{{font:600 .9rem var(--sans);padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}}
-.wactions .wapply{{background:var(--accent);color:var(--bg);border-color:var(--accent)}}
-.whatif{{background:var(--accent-soft);color:var(--ink);padding:8px 12px;border-radius:8px;font-size:.92rem}}
-.chart{{margin:1.5rem 0;width:100%}}
-.plot{{position:relative;height:30vh;min-height:180px;margin-left:36px;border-left:1px solid var(--line);border-bottom:1px solid var(--line)}}
-.plot svg{{position:absolute;inset:0;width:100%;height:100%;overflow:visible}}
-.yax span{{position:absolute;left:-34px;transform:translateY(-50%);font-size:.75rem;color:var(--muted)}}
-.xax{{position:relative;height:1.4rem;margin-left:36px;font-size:.75rem;color:var(--muted)}}
-.xax span{{position:absolute;transform:translateX(-50%);top:4px}}
-.peaklbl .pk{{position:absolute;top:-1.2rem;transform:translateX(-50%);font-size:.75rem;color:var(--strong)}}
-svg .att{{fill:none;stroke:var(--att);stroke-width:2.5;vector-effect:non-scaling-stroke}}
-svg .surv{{fill:none;stroke:var(--surv);stroke-width:2;stroke-dasharray:6 4;vector-effect:non-scaling-stroke}}
-svg .hook{{fill:var(--hook);opacity:.12}} svg .drop{{fill:var(--drop);opacity:.12}} svg .strong{{fill:var(--strong);opacity:.10}}
-svg .grid{{stroke:var(--line);vector-effect:non-scaling-stroke}}
-svg .cut{{stroke:var(--muted);stroke-dasharray:2 3;vector-effect:non-scaling-stroke;opacity:.6}}
-svg .peak{{stroke:var(--strong);stroke-width:1.5;vector-effect:non-scaling-stroke}}
-figcaption{{display:flex;flex-wrap:wrap;gap:14px;font-size:.8rem;color:var(--muted);margin-top:.4rem}}
-.sw{{display:inline-block;width:14px;height:10px;margin-right:5px;border-radius:2px;vertical-align:middle}}
-.sw.att{{background:var(--att)}} .sw.surv{{background:var(--surv)}} .sw.hook{{background:var(--hook);opacity:.4}}
-.sw.drop{{background:var(--drop);opacity:.4}} .sw.strong{{background:var(--strong);opacity:.35}}
-.sw.cut{{border-left:2px dashed var(--muted);border-radius:0;width:0}}
-details img{{max-width:100%;border:1px solid var(--line);border-radius:12px;margin-top:.5rem}}
-.media{{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:20px;align-items:start}}
-.player video{{width:100%;max-height:60vh;border-radius:12px;background:#000}}
-.player code{{font-size:.7rem;word-break:break-all}}
-.playhead{{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);opacity:.8;pointer-events:none}}
-.edots .edot{{position:absolute;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid var(--bg);
-  box-shadow:0 0 0 1px rgba(0,0,0,.25);cursor:default}}
-.edots .edot.strong{{box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--fg)}}
-.edots .edot.on{{transform:translate(-50%,-50%) scale(1.6);z-index:2}}
-.etip{{position:absolute;transform:translate(-50%,calc(-100% - 14px));padding:3px 8px;border-radius:6px;font-size:.75rem;
-  white-space:nowrap;background:var(--fg);color:var(--bg);pointer-events:none;z-index:3}}
-.emo .band{{display:flex;height:18px;margin:.6rem 0 0 36px;border-radius:4px;overflow:hidden}}
-.emo .band i{{display:block}} .emo p{{margin:.4rem 0 0 36px;font-size:.9rem}} .emo figcaption{{margin-left:36px}}
-ol.sugs li{{margin:.6rem 0}} .badge{{display:inline-block;font-size:.75rem;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin-left:4px}}
-details.variant video{{max-height:45vh;border-radius:8px;margin-top:.4rem}}
-ul.transcript{{list-style:none;padding:0;columns:2;column-gap:24px}} ul.transcript li{{break-inside:avoid;margin:.2rem 0}}
-a.ts{{font-variant-numeric:tabular-nums;margin-right:.4rem}}
-@media (max-width:800px){{.media{{grid-template-columns:1fr}} ul.transcript{{columns:1}}}}
-@media (max-width:640px){{.tiles{{grid-template-columns:repeat(2,1fr)}}}}
-.why table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
-.why th,.why td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}}
-.why th{{color:var(--muted);font-weight:500;font-size:.85rem}} .why .num{{text-align:right;white-space:nowrap}}
-.why tr.top td:first-child{{font-weight:700}} .why .pos{{color:var(--hook)}} .why .neg{{color:var(--drop)}}
-.why .wrap{{overflow-x:auto}}
-.caption blockquote{{margin:.4rem 0;padding:.6rem 1rem;border-left:3px solid var(--strong);background:color-mix(in srgb,var(--line) 35%,transparent);border-radius:6px;white-space:pre-wrap}}
-.vbar{{position:relative;display:block;width:160px;height:10px;background:var(--line);border-radius:5px}}
-.vbar::after{{content:"";position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--muted)}}
-.vbar i{{position:absolute;top:0;bottom:0;border-radius:5px}} .vbar i.up{{background:var(--hook)}} .vbar i.down{{background:var(--drop)}}
-</style>
-<h1>Hookline report <span>{job_id} ({mode})</span></h1>
-<p class=muted>{html.escape(Path(r.get('video', '')).name)} · {r.get('duration_s', '?')}s{mods_txt}</p>
-{gate_html}
-{_music_html(r)}
-<div class="tiles">
-{tile('Hook', f"{s['hook_pct']:.0f}", s['hook_band'])}
-{tile('Hold', f"{s['hold_rate_pct']:.0f}%", 'stay to the end')}
-{tile('Finish', f"{s['finish_pct']:.0f}%", 'watch-through')}
-{tile('Viral potential' + (' · caption ignored' if ignore_cap else ''), f'<span id=tilevp>{vp_val:.0f}</span>', f'<span id=tiletag>{html.escape(vp_tag)}</span>')}
-</div>
-<div class=media>{video_html}<div class=chartcol>{_chart_svg(r)}{_emotion_html(r)}</div></div>
-{_caption_html(r)}
-{_virality_html(r)}
-{_suggestions_html(r, job_id)}
-{_transcript_html(r)}
-{'<h2>What to change</h2><ul>' + recs + '</ul>' if HL.SHOW_SUGGESTIONS else ''}
-{png_html}
-<p class=muted>Viral potential: {html.escape(s.get('virality_method', 'legacy formula'))}.
-Avg attention {s.get('avg_attention', '?')} (~50 by design: attention is scored within the video).</p>
-<p><i>{html.escape(r['method'])}</i> · {"Full analysis by the Virality Predictor" if full else "Quick preview (synthetic brain stand-in)"}</p>
-<p><a href="/report/{job_id}">JSON</a> · <a href="/report/{job_id}.md">Markdown</a>
-{f'<form method=post action="/report/{job_id}/regenerate?redirect=true" style="display:inline"> · <button>Regenerate from raw model output</button></form>' if (OUT / job_id / "raw" / "meta.json").exists() else ''}
-{'<span class=muted> · built locally from the raw analysis</span>' if r.get("regenerated_locally") else ''}</p>
-<script>
-(() => {{
-  const f = document.getElementById("wform");
-  if (!f) return;
-  const msg = document.getElementById("wmsg");
-  const base = ["hook", "drop_free", "strong_moments", "ending"];
-  const total = () => base.reduce((a, k) => a + (parseFloat(f.querySelector("[name=" + k + "]").value) || 0), 0);
-  const check = () => {{
-    const t = total(), ok = Math.abs(t - 1) <= 0.001;
-    const el = document.getElementById("wtotal");
-    el.textContent = t.toFixed(2); el.parentElement.classList.toggle("bad", !ok);
-    document.getElementById("wapply").disabled = !ok;
-    return ok;
-  }};
-  f.addEventListener("input", check); check();
-  const send = async body => {{
-    msg.textContent = "Applying to all reports…";
-    try {{
-      const r = await fetch("/weights", {{method: "POST", headers: {{"Content-Type": "application/json"}}, body: JSON.stringify(body)}});
-      const j = await r.json();
-      if (!r.ok) {{ msg.textContent = j.error || "Could not save the weights."; return; }}
-      msg.textContent = "Updated " + j.updated + " reports. Reloading…";
-      setTimeout(() => location.reload(), 400);
-    }} catch (e) {{ msg.textContent = "Could not reach the server."; }}
-  }};
-  f.addEventListener("submit", e => {{
-    e.preventDefault();
-    if (!check()) {{ msg.textContent = "The attention weights must add up to 1 before you can apply them."; return; }}
-    const w = {{}};
-    f.querySelectorAll("input").forEach(i => w[i.name] = parseFloat(i.value));
-    send({{weights: w}});
-  }});
-  document.getElementById("wreset").addEventListener("click", () => send({{reset: true}}));
-}})();
-/* What-if: switch factors in or out of the final rating. Same formula as the server (hookline_report.finalize):
-   attention factors re-weighted over the ones left on, then the caption lift. The emotional-peaks lift
-   is 0 by default (emotion is insight, not a score input) and returns only if its weight is set > 0. */
-(() => {{
-  const why = document.querySelector("section.why");
-  if (!why) return;
-  const tiers = JSON.parse(why.dataset.tiers || "[]");
-  const boxes = [...why.querySelectorAll(".fsw input")];
-  if (!boxes.length) return;
-  const orig = document.getElementById("vpnum").textContent;
-  const tierOf = v => (tiers.find(t => v < t[0]) || [0, ""])[1];
-  const set = (id, txt) => {{ const el = document.getElementById(id); if (el) el.textContent = txt; }};
-  const recompute = () => {{
-    let ws = 0, sum = 0, v, steps = [], terms = [], off = [];
-    boxes.forEach(b => b.closest("tr").classList.toggle("off", !b.checked));
-    boxes.filter(b => b.dataset.kind === "base").forEach(b => {{
-      const label = b.closest("td").textContent.trim();
-      if (b.checked) {{ ws += +b.dataset.weight; sum += +b.dataset.weight * +b.dataset.value;
-        terms.push(+b.dataset.weight + " × " + Math.round(+b.dataset.value) + " <i>" + label.toLowerCase() + "</i>"); }}
-      else off.push(label);
-    }});
-    const base = ws ? sum / ws : 50;  // no attention factor left: a typical reel
-    v = base;
-    steps.push("<li><span>Attention base</span><code>" + (terms.length ? "(" + terms.join(" + ") + ") ÷ " + +ws.toFixed(2)
-      : "no attention factor on: typical reel") + "</code><b>" + base.toFixed(1) + "</b></li>");
-    boxes.filter(b => b.dataset.kind === "lift").forEach(b => {{
-      const label = b.closest("td").textContent.trim();
-      if (!b.checked) {{ off.push(label); return; }}
-      const add = +b.dataset.weight * (+b.dataset.value / 100) * (100 - v);
-      steps.push("<li><span>+ " + label + "</span><code>" + +b.dataset.weight + " × " + Math.round(+b.dataset.value) +
-        "/100 × (100 − " + v.toFixed(1) + ")</code><b>+" + add.toFixed(1) + "</b></li>");
-      v += add;
-    }});
-    const vr = Math.round(v), tag = tierOf(v);
-    set("vpnum", vr); set("vptag", tag); set("tilevp", vr); set("tiletag", tag);
-    steps.push("<li class=res><span>Viral potential</span><code>" + v.toFixed(1) + ", rounded</code><b>" + vr +
-      " <em>" + tag + "</em></b></li>");
-    document.getElementById("vpcalc").innerHTML = steps.join("");
-    const w = document.getElementById("vpwhatif");
-    w.hidden = !off.length;
-    if (off.length) w.textContent = "What-if: without " + off.join(", ") + " the viral potential would be " + vr +
-      " (" + tag + "), instead of " + orig + ". Saved reports are unchanged.";
-  }};
-  boxes.forEach(b => b.addEventListener("change", recompute));
-}})();
-(() => {{
-  const v = document.getElementById("reel"), ph = document.getElementById("playhead");
-  const T = {len((r.get("series") or {}).get("attention") or []) or 1};
-  const tip = document.getElementById("etip");
-  const dots = {{}};
-  document.querySelectorAll(".edot").forEach(d => dots[d.dataset.s] = d);
-  let lit = null;
-  const sync = () => {{
-    ph.hidden = false; ph.style.left = Math.min(100, 100 * v.currentTime / T) + "%";
-    // emotion label when the playhead reaches a dot
-    const d = dots[Math.floor(v.currentTime)];
-    if (lit && lit !== d) {{ lit.classList.remove("on"); lit = null; }}
-    if (d && tip) {{
-      d.classList.add("on"); lit = d;
-      tip.textContent = d.dataset.label; tip.style.left = d.style.left; tip.style.top = d.style.top;
-      tip.style.background = d.style.background; tip.hidden = false;
-    }} else if (tip) {{ tip.hidden = true; }}
-  }};
-  // playback and scrubbing (a paused seek fires 'seeked', not 'timeupdate')
-  if (v && ph) ["timeupdate", "seeked"].forEach(ev => v.addEventListener(ev, sync));
-  document.querySelectorAll("a.ts").forEach(a => a.addEventListener("click", e => {{
-    e.preventDefault(); if (v) {{ v.currentTime = +a.dataset.t; v.play(); }}
-  }}));
-}})();
-</script>"""
-
-
-@app.post("/jobs/colab")
-def colab_instructions(job_id: str = ""):
-    return {"how": "open tribe/tribe_colab.ipynb (T4) → upload backend/out/<job>/input.* "
-                   "→ run --device cuda → copy preds.npy/times.npy/meta.json back → "
-                   "POST /analyze already produced preview; full report re-runs hookline_report.analyse().",
-            "job": job_id or "<job_id>"}
+    ok, why = ttcc.environment_ready()
+    return {"status": "ok", "service": "project-phoenix", "version": 2,
+            "model_env": "ready" if ok else f"unavailable: {why}"}
+
+
+@app.post("/api/analyze")
+async def analyze(
+    video: Optional[UploadFile] = File(default=None),
+    video_path: str = Form(default=""),
+    caption: str = Form(default=""),
+    sample: str = Form(default=""),
+):
+    """Queue an analysis. Returns the job id immediately; poll /api/report/{id}."""
+    rid = f"job_{uuid.uuid4().hex[:8].upper()}"
+    job_dir = JOBS_DIR / rid
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _write_status(job_dir, "queued")
+
+    saved = ""
+    if video is not None and video.filename:
+        dest = job_dir / "video.mp4"
+        with dest.open("wb") as f:
+            shutil.copyfileobj(video.file, f)
+        saved = str(dest)
+    elif video_path and Path(video_path).is_file():
+        saved = video_path
+    elif sample:
+        matches = [p for p in SAMPLES_DIR.rglob("*.mp4") if sample.lower() in p.stem.lower()]
+        if matches:
+            saved = str(matches[0])
+    if not saved:  # last resort: first sample reel
+        fallback = sorted(SAMPLES_DIR.rglob("*.mp4"))
+        if fallback:
+            saved = str(fallback[0])
+    (job_dir / "video_path.txt").write_text(saved or "")
+
+    duration = _probe_duration(Path(saved)) if saved else 28.0
+    thread = threading.Thread(target=_run_job, args=(rid, Path(saved or "demo.mp4"),
+                                                     caption, duration), daemon=True)
+    thread.start()
+    return JSONResponse({"job_id": rid, "status": "queued",
+                         "model_env": "ready" if ttcc.environment_ready()[0] else "unavailable"})
+
+
+@app.get("/api/report/{rid}")
+def get_report(rid: str):
+    job_dir = JOBS_DIR / rid
+    report = job_dir / "report.json"
+    if report.is_file():
+        return JSONResponse(json.loads(report.read_text()))
+    status = job_dir / "status.json"
+    if status.is_file():
+        s = json.loads(status.read_text())
+        return JSONResponse({
+            "job_id": rid, "status": s["status"], "detail": s.get("detail", ""),
+            "progress": s.get("progress", 0),
+            "stage_index": s.get("stage_index", 0),
+            "stage_total": s.get("stage_total", len(STAGES)),
+            "stages": STAGES,
+        })
+    raise HTTPException(status_code=404, detail=f"no job {rid}")
+
+
+@app.get("/api/media/{rid}")
+def media(rid: str):
+    """Stream the analysed video so the report page can play it inline."""
+    job_dir = JOBS_DIR / rid
+    path = Path((job_dir / "video_path.txt").read_text()) if (job_dir / "video_path.txt").is_file() else Path("")
+    if not path.is_file():
+        path = job_dir / "video.mp4"
+    if not path.is_file() and (job_dir / "report.json").is_file():
+        path = Path(json.loads((job_dir / "report.json").read_text()).get("video", ""))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"no video for {rid}")
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@app.get("/api/reports")
+def list_reports():
+    out = []
+    for d in sorted(JOBS_DIR.iterdir(), reverse=True):
+        rj = d / "report.json"
+        if rj.is_file():
+            r = json.loads(rj.read_text())
+            out.append({
+                "job_id": r.get("job_id", d.name),
+                "video": Path(r.get("video", "")).name,
+                "duration_s": r.get("duration_s"),
+                "virality": r.get("scores", {}).get("virality"),
+                "virality_tag": r.get("scores", {}).get("virality_tag"),
+                "demo": r.get("demo", False),
+            })
+    return out

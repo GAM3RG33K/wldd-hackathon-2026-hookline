@@ -4,10 +4,28 @@ Predict how a short video (reel) holds attention **before** it is posted: second
 
 Built for the WLDD hackathon 2026. Scores are within-video, uncalibrated heuristics (the average second is about 50); they are model estimates, not measured retention.
 
-## Quick start
+## Project Phoenix (v2, this branch: `project-v2`)
+
+A ground-up rebuild: the retention model runs **locally on Apple Silicon** (no GPU Space), and the web app is a standalone Next.js frontend backed by a small FastAPI service. Everything user-facing is "Project Phoenix".
 
 ```bash
-./run-demo.sh            # installs deps once, starts the local backend (:8000), opens the TUI
+./setup.sh      # one time: creates .venv-v2 and verifies every import before saying OK
+./run_dev.sh    # starts the backend (:8000) and the web app (:3000) together
+```
+
+- **Web app** (`wlddhq-v2/`): upload → live per-step progress (published by the backend, no internals exposed) → full report. Report matches the approved design: realtime video player synced per-frame with the retention chart (drag the chart to scrub; playhead follows playback), chart layers (Retention / Zones / Cuts / Emotion), "Why viral potential" with per-factor what-if switches and the step-by-step calculation, timestamped editing suggestions ranked by viewers lost, caption fit, export (PDF / JSON / Markdown), and a reports list at `/reports`.
+- **Scoring** (`phoenix/scorer.py`): builds the whole report from a retention curve R(1..60) — hook / hold / finish, hooks (consecutive retention climbs), drop-off zones (consecutive drops), attention (within-video normalised, avg ≈ 50), timestamped suggestions. Method string stays `heuristic, within-video normalised, uncalibrated` until fitted on real view counts.
+- **Model access** (`phoenix/ttcc.py`): calls the pinned retention model in its own environment as a subprocess and returns R(1..60) plus provenance; `phoenix/patch_ttcc_env.py` keeps that environment working (idempotent). If the model environment or enough free memory isn't available, the job falls back to a demo curve clearly marked `demo: true`.
+- **Backend** (`backend/app.py`): `POST /api/analyze` queues a job and returns a job id; per-step + overall progress is published while it runs; `GET /api/report/{id}`, `GET /api/reports`, `GET /api/media/{id}` (streams the analysed video for the inline player).
+- **Rules that carry over**: judge the video, never the account (follower range + views are display/validation context only); scores are within-video heuristics; every suggestion carries a timestamp and evidence.
+- Still to build: the "Edit video" screen (cut / zoom tracks with apply/undo, final playback, re-analyse).
+
+The rest of this README describes the v1 pipeline (TUI + GPU Space), which still works on `main`.
+
+## Quick start (v1)
+
+```bash
+./launch-services.sh     # installs deps once, starts the local backend (:8000), opens the TUI
 ```
 
 - GPU work runs on the Hugging Face Space `wlddhq/hookline-tribe` (A100). Start it from the TUI with `S` → `s`; it sleeps after 30 min idle. Needs an HF token (`hf auth login`).

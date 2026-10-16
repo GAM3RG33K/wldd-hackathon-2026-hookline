@@ -37,3 +37,11 @@ tribe/out/demo_sneaker/*
 # Upstream clone (facebookresearch/tribev2), install from source instead
 tribe/repo/
 !hf_space/caption_gallery.npy
+
+# v2 (Phoenix): local model env, dataset copy, webapp build artifacts, caches
+.venv-v2/
+samples_v2/
+wlddhq-v2/node_modules/
+wlddhq-v2/.next/
+tribe/cache/
+backend/out/video_path.txt

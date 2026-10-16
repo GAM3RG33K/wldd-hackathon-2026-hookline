@@ -1,5 +1,44 @@
 # Hookline architecture: what runs where
 
+## Project Phoenix (v2, branch `project-v2`)
+
+The v2 rebuild runs everything on one machine — no GPU Space in the loop. All user-facing strings are "Project Phoenix".
+
+```
+ ┌──────────────── your machine ────────────────────────┐
+ │  wlddhq-v2/  Next.js web app (:3000)                 │
+ │   ├─ upload (sample reel or own file + caption)      │
+ │   ├─ processing screen: per-step + overall progress  │
+ │   │   published by the backend (no internals shown)  │
+ │   └─ report: realtime player ⇄ retention chart       │
+ │       (per-frame sync, drag to scrub), chart layers, │
+ │       why-viral switches, suggestions, caption fit,  │
+ │       export (PDF/JSON/MD), /reports list            │
+ │            ▲  fetch /api/*                           │
+ │  backend/app.py  FastAPI (:8000)                     │
+ │   ├─ POST /api/analyze → job id (background thread)  │
+ │   ├─ publishes status.json: progress, stage, detail  │
+ │   ├─ phoenix/ttcc.py → pinned retention model in its │
+ │   │   own env (subprocess) → R(1..60) + provenance   │
+ │   ├─ phoenix/scorer.py  curve → full report          │
+ │   │   (hook/hold/finish, hooks = retention climbs,   │
+ │   │    drop zones = retention drops, suggestions)    │
+ │   └─ writes backend/out/<job>/{report.json, …}       │
+ │  demo fallback: model env or memory unavailable →    │
+ │  demo curve, report marked demo:true                 │
+ └──────────────────────────────────────────────────────┘
+```
+
+Key properties (same rules as v1):
+
+- **Scores are built locally from the retention curve** — changing `phoenix/scorer.py` changes the next report with no model re-run.
+- **Progress is honest and product-worded**: the backend publishes per-step + overall progress; the web app renders exactly what the backend publishes. No model/GPU/infra names in user-facing text.
+- **Method string** stays `heuristic, within-video normalised, uncalibrated` until fitted on real view counts; the report footer states it on every surface.
+- **Demo fallback** is explicit (`demo: true` + "Demo data" pill) — never presented as a model result.
+- Files: `phoenix/scorer.py` (scoring), `phoenix/ttcc.py` (local model subprocess), `phoenix/patch_ttcc_env.py` (keeps the model env importable), `backend/app.py` (API + jobs), `wlddhq-v2/app/` (web app), `setup.sh` (venv + import verification), `run_dev.sh` (launch both).
+
+## v1: TUI + GPU Space
+
 Hookline has three parts:
 
 1. **TUI** on your machine (`tui.py`): you pick a video here and read the result.

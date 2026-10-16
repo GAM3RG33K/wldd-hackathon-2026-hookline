@@ -1,5 +1,4 @@
 # fast in-process transcription (faster-whisper) instead of a whisperx subprocess per video
-!pip -q install faster-whisper
 import pathlib
 p = pathlib.Path("/content/tribev2/tribev2/eventstransforms.py")
 s = p.read_text()

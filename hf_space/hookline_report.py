@@ -610,7 +610,7 @@ def apply_weights(report, W=None):
 
 def write_md(r, path):
     s, m = r["scores"], r["moments"]
-    lines = [f"# Hookline report", "", f"`{Path(r['video']).name}`, {r['duration_s']}s", "",
+    lines = ["# Hookline report", "", f"`{Path(r['video']).name}`, {r['duration_s']}s", "",
              f"- **Hook score:** {s['hook_pct']}% ({s['hook_band']})",
              f"- **Hold rate:** {s['hold_rate_pct']}% of hooked viewers stay to the end",
              f"- **Finish rate:** {s['finish_pct']}%",
